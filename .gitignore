@@ -1,0 +1,29 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Pipeline output (large, not committed)
+artists/
+wacz_output/
+*.wacz
+*.json
+*.lst
+
+# Node / Browsertrix runtime caches
+node-compile-cache/
+
+# PhantomJS binary (not used, legacy)
+phantomjs/
+
+# Editors
+.vscode/
+.idea/
