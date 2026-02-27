@@ -119,12 +119,18 @@ def crawl_album(album_url: str, output_dir: Optional[Path] = None, update_json: 
 
     if item_id:
         display_name    = f"{safe_title} [{item_id}]"
-        # Browsertrix only allows [a-zA-Z0-9_-] in collection names -
-        # apply a strict strip after building the name from safe_title.
-        collection_name = re.sub(r"[^a-zA-Z0-9_-]", "", f"{safe_title}_{item_id}")[:80] or f"release_{item_id}"
+        # Browsertrix only allows [a-zA-Z0-9_-] in collection names.
+        # Strip non-safe chars, then strip any leading/trailing hyphens or
+        # underscores — a name like '-KentaroHirugami_123' (produced when the
+        # title starts with non-ASCII chars such as Japanese) causes Browsertrix
+        # to reject --collection and fall back to crawl-<timestamp> naming,
+        # making the expected WACZ path wrong.
+        collection_name = re.sub(r"[^a-zA-Z0-9_-]", "", f"{safe_title}_{item_id}")[:80]
+        collection_name = collection_name.strip("-_") or f"release_{item_id}"
     else:
         subdomain       = subdomain_from_url(album_url)
-        collection_name = re.sub(r"[^a-zA-Z0-9_-]", "", f"{subdomain}_{safe_title}")[:80] or "unknown"
+        collection_name = re.sub(r"[^a-zA-Z0-9_-]", "", f"{subdomain}_{safe_title}")[:80]
+        collection_name = collection_name.strip("-_") or "unknown"
         display_name    = collection_name
 
     # Ensure the final filename fits within the archive.org byte limit
