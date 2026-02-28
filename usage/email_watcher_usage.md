@@ -34,6 +34,7 @@ python bandcamp_wacz/email_watcher.py [OPTIONS]
 | `--full` | Always run the full pipeline, even for artists that already have a JSON file. By default the watcher passes `--quick` to `archive.py` for known artists to avoid re-fetching metadata |
 | `--dry-run` | Parse and log emails without running the pipeline or moving any messages. Safe to use against a live inbox |
 | `--lax` | Disable the sender check — matches any email whose subject contains `"New release(s) from ..."` regardless of sender, including forwarded messages. **For testing only** |
+| `--notify` | Send a desktop notification via `notify-send` whenever an `ERROR` or `CRITICAL` message is logged. Requires `libnotify` and an active desktop session. No-op if `notify-send` is not on `PATH` |
 | `--debug` | Enable verbose `DEBUG`-level logging. Also passed through to `archive.py` |
 
 ---
@@ -112,32 +113,82 @@ On every reconnect the inbox is drained immediately before re-entering IDLE, so 
 
 ---
 
-## Running as a Service
+## Running on Boot (systemd user service + tmux)
 
-To keep the watcher running persistently, wrap it in a systemd unit or similar process supervisor.
+The watcher runs as a **systemd user service** (no `sudo` needed) inside a persistent tmux session. This gives you:
+- automatic start on login / boot
+- a live pane you can attach to any time with `tmux attach -t bandcamp-watcher`
+- desktop notifications on errors (via `--notify` + `notify-send`)
 
-**Example systemd unit (`/etc/systemd/system/bandcamp-watcher.service`):**
+### 1. Install the service file
 
-```ini
-[Unit]
-Description=Bandcamp WACZ email watcher
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/path/to/project
-ExecStart=/path/to/venv/bin/python bandcamp_wacz/email_watcher.py
-Restart=on-failure
-RestartSec=30
-
-[Install]
-WantedBy=multi-user.target
-```
+A template unit file is provided at `bandcamp-watcher.service.example` in the project root. Copy and rename it, then edit the `ExecStart` line to set your paths:
 
 ```bash
-sudo systemctl enable --now bandcamp-watcher
-sudo journalctl -fu bandcamp-watcher
+mkdir -p ~/.config/systemd/user/
+cp bandcamp-watcher.service.example ~/.config/systemd/user/bandcamp-watcher.service
+```
+
+Open `~/.config/systemd/user/bandcamp-watcher.service` and replace the two placeholder paths on the `ExecStart` line with your own:
+
+```
+ExecStart=/usr/bin/tmux new-session -A -d -s bandcamp-watcher -c /path/to/project /path/to/python bandcamp_wacz/email_watcher.py --notify
+```
+
+For example, if your repo is at `~/bandcamp-wacz-archiver` with a venv inside it:
+
+```
+ExecStart=/usr/bin/tmux new-session -A -d -s bandcamp-watcher -c /home/youruser/bandcamp-wacz-archiver /home/youruser/bandcamp-wacz-archiver/.venv/bin/python bandcamp_wacz/email_watcher.py --notify
+```
+
+Two things to keep in mind: use absolute paths (no `~` or `$HOME`), and keep the line unbroken — systemd does not support backslash line continuations in `ExecStart`.
+
+### 2. Enable and start
+
+```bash
+# Reload unit files, then enable + start
+systemctl --user daemon-reload
+systemctl --user enable --now bandcamp-watcher
+
+# Confirm it is running
+systemctl --user status bandcamp-watcher
+```
+
+To start the service automatically on boot before you log in, enable lingering:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+### 3. Attach to the tmux session
+
+```bash
+tmux attach -t bandcamp-watcher
+```
+
+Detach again with `Ctrl-b d`. The watcher keeps running — detaching does not stop it.
+
+### 4. Error notifications
+
+The service starts the watcher with `--notify`, which fires a `notify-send` desktop notification whenever an `ERROR` or `CRITICAL` message is logged (IMAP failures, pipeline exits, unexpected exceptions). Install `libnotify` if it is not already present:
+
+```bash
+sudo pacman -S libnotify
+```
+
+Notifications are silent/no-op if `notify-send` is not on `PATH` or if no desktop session is available, so the flag is safe to leave in the service file permanently.
+
+### 5. Useful commands
+
+```bash
+# View service lifecycle events (start/stop) — Python output is in the tmux pane, not here
+journalctl --user -u bandcamp-watcher -n 50
+
+# Restart after a config change
+systemctl --user restart bandcamp-watcher
+
+# Stop permanently
+systemctl --user disable --now bandcamp-watcher
 ```
 
 ---

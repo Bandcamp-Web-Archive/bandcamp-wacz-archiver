@@ -104,11 +104,14 @@ results = crawl_list(urls, skip_errors=False)
 
 ### Step 2 — Collection Name
 
-Browsertrix requires a collection name that matches `[a-zA-Z0-9_-]`. `crawl.py` builds this from the sanitised title and `item_id` (or the URL subdomain as a fallback), strips any disallowed characters, and truncates to 80 characters:
+Browsertrix requires a collection name that matches `[a-zA-Z0-9_-]`. `crawl.py` builds this from the sanitised title and `item_id` (or the URL subdomain as a fallback), strips any disallowed characters, truncates to 80 characters, and strips any leading or trailing hyphens and underscores:
 
 ```
 collection_name = re.sub(r"[^a-zA-Z0-9_-]", "", f"{safe_title}_{item_id}")[:80]
+collection_name = collection_name.strip("-_")
 ```
+
+The trailing `.strip("-_")` is important for titles that begin with non-ASCII characters (e.g. Japanese or Chinese). For example, the title `宇宙の謎 / Kentaro Hirugami` sanitises to `宇宙の謎 - Kentaro Hirugami`, and after stripping non-ASCII characters the collection name would be `-KentaroHirugami_550048376` — a leading hyphen that Browsertrix interprets as a malformed CLI flag, causing it to silently fall back to its default `crawl-<timestamp>` name. Stripping leading/trailing hyphens and underscores prevents this.
 
 If the result is an empty string (e.g. a title composed entirely of non-ASCII characters), it falls back to `release_{item_id}`.
 

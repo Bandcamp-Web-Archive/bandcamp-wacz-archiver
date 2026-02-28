@@ -30,10 +30,11 @@ python archive.py [--url URL [URL ...] | --list [FILE]] [OPTIONS]
 | Flag | Description |
 |---|---|
 | `--url URL`, `-u URL` | One or more Bandcamp album or artist URLs |
+| `--slug SLUG`, `-s SLUG` | One or more Bandcamp artist slugs (e.g. `alyaserpentis`). Expanded to `https://<slug>.bandcamp.com/` before processing. Accepts multiple space-separated slugs |
 | `--list [FILE]`, `-l [FILE]` | Archive all URLs in FILE. Defaults to `bandcamp-dump.lst` if no file is specified |
 | `--quick` | Run the quick single-release pipeline instead of the full smart pipeline |
 | `--dumb` | Bare crawl with no JSON interaction |
-| `--output DIR`, `-o DIR` | Output directory for WACZ files. Defaults to `WACZ_OUTPUT_DIR` from `.env` |
+| `--output DIR`, `-o DIR` | Output directory for WACZ files. If omitted, a unique subdirectory is created automatically under `WACZ_OUTPUT_DIR` (see [Concurrent Jobs](#concurrent-jobs)) |
 | `--no-upload` | Skip uploading to archive.org after archiving |
 | `--skip-metadata` | Skip the fetch/update metadata step and archive only what is already queued (`archived=False`) |
 | `--one-by-one` | Archive and upload one release at a time. Saves disk space for large discographies |
@@ -59,6 +60,13 @@ python archive.py --url https://someartist.bandcamp.com/album/some-album
 python archive.py --url https://someartist.bandcamp.com/album/a \
                        https://someartist.bandcamp.com/album/b
 
+# Using a slug instead of a full URL
+python archive.py --slug someartist
+
+# Multiple artists in one command — pipeline runs once per artist
+python archive.py --slug artistone artisttwo artistthree
+python archive.py --url https://artistone.bandcamp.com/ https://artisttwo.bandcamp.com/
+
 # Archive without uploading
 python archive.py --url https://someartist.bandcamp.com/ --no-upload
 
@@ -75,7 +83,7 @@ python archive.py --url https://someartist.bandcamp.com/ --one-by-one
 
 Each URL is stripped to its artist root (e.g. `https://artist.bandcamp.com/`). The artist page is fetched and `band_id` is extracted. If the root page does not expose a `band_id` (some single-release artists have no dedicated artist page and redirect to an album), the original URL is tried as a fallback.
 
-If multiple URLs resolve to different `band_id`s (different artists), the pipeline aborts with an error. All URLs must belong to a single artist.
+URLs are grouped by `band_id` before any further processing. If multiple artists are detected, the pipeline runs once per artist group in sequence — each artist gets a full independent pipeline run. A header is printed between artists showing the current artist number and `band_id`.
 
 **Step 2 — Metadata fetch or update**
 
@@ -218,7 +226,7 @@ archive.py --url <URL>
     │                 → upload (unless --no-upload)
     │
     └── (default)   → resolve artist root + band_id
-                      → abort if multiple artists
+                      → group by artist, loop per artist:
                       → fetch_metadata.py  (if no JSON)
                         OR update_metadata  (if JSON exists)
                         OR skip            (if --skip-metadata)
@@ -229,6 +237,28 @@ archive.py --url <URL>
 archive.py --list <FILE>
     └── read URLs → crawl_list → done (no upload)
 ```
+
+---
+
+## Concurrent Jobs
+
+Multiple `archive.py` processes can run simultaneously without interfering with each other. When `--output` is not specified, each job automatically creates its own isolated subdirectory under `WACZ_OUTPUT_DIR` rather than writing directly into the shared folder:
+
+```
+wacz_output/
+├── job_12345_a3f9c12b/       ← process 1
+│   ├── Album A [111].wacz
+│   └── Album A [111].json
+└── job_67890_b4e0d23f/       ← process 2
+    ├── Album B [222].wacz
+    └── Album B [222].json
+```
+
+The subdirectory name encodes the process ID and a short random suffix (`job_{pid}_{8-char hex}`), so it is unique even if the same artist is queued more than once at the same time. Each job's upload step only scans its own subdirectory, so there is no risk of two jobs racing to upload the same file.
+
+The subdirectory is removed automatically when the job finishes, provided all uploads succeeded and no files remain. If uploads failed and files were left behind, the directory is kept for inspection and manual recovery.
+
+If you pass `--output DIR` explicitly, that directory is used as-is with no subdirectory created and no automatic cleanup — the existing behaviour for scripted or manual runs is unchanged.
 
 ---
 
@@ -252,6 +282,3 @@ Neither `run_smart_pipeline` nor `run_quick_pipeline` has a dry-run mode. Passin
 
 ### Atomic artist JSON writes
 The quick pipeline writes the artist JSON directly with `Path.write_text` in two places (when adding a new release and when applying changes). The same `.tmp` + `Path.replace()` pattern used in `fetch_metadata.py` should be applied here for consistency and safety.
-
-### Multi-artist support in smart mode
-The smart pipeline explicitly aborts if URLs from multiple artists are provided. A `--multi-artist` flag (or simply removing the restriction) that runs the full pipeline once per artist would make batch onboarding much smoother — for example, passing a list of URLs from a label's release page.

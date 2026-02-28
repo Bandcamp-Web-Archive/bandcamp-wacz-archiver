@@ -27,9 +27,12 @@ Usage
 from __future__ import annotations
 
 import argparse
+import atexit
 import logging
+import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 from bandcamp_wacz.crawl import crawl_album, crawl_list
@@ -262,6 +265,36 @@ def _reset_archived(artist_folder: Path, item_ids: list[int]) -> None:
         json_path.write_text(_json.dumps(data, indent=4, ensure_ascii=False), encoding="utf-8")
 
 
+# ── Artist grouping ───────────────────────────────────────────────────────────
+
+def _group_urls_by_artist(
+    urls: list[str],
+    logger: logging.Logger,
+) -> dict[int, tuple[str, list[str]]]:
+    """
+    Resolve every URL to its artist root + band_id and group them.
+
+    Returns {band_id: (artist_root, [original_urls])} so the smart pipeline
+    can be called once per artist when multiple artists are supplied.
+    """
+    groups: dict[int, tuple[str, list[str]]] = {}
+    for url in urls:
+        root = _to_artist_root(url)
+        logger.info("Resolving artist for: %s", root)
+        band_id = _fetch_band_id(root)
+        if band_id is None:
+            logger.debug("Could not get band_id from root, trying original URL: %s", url)
+            band_id = _fetch_band_id(url)
+        if band_id is None:
+            logger.error("Could not determine band_id for %s - aborting.", url)
+            sys.exit(1)
+        logger.info("band_id=%s", band_id)
+        if band_id not in groups:
+            groups[band_id] = (root, [])
+        groups[band_id][1].append(url)
+    return groups
+
+
 # ── Smart pipeline ────────────────────────────────────────────────────────────
 
 def run_smart_pipeline(
@@ -382,8 +415,7 @@ def run_smart_pipeline(
             sys.exit(1)
 
     # Step 4: detect releases marked archived but with no WACZ file on disk
-    out = output_dir or WACZ_OUTPUT_DIR
-    missing = _releases_missing_wacz(artist_folder, out)
+    missing = _releases_missing_wacz(artist_folder, output_dir)
     if missing:
         logger.warning(
             "%d release(s) marked archived but WACZ file missing — refreshing metadata and re-queuing:",
@@ -686,7 +718,31 @@ def main() -> None:
         check_podman()
         sys.exit(0)
 
-    output_dir = Path(args.output) if args.output else None
+    if args.output:
+        output_dir = Path(args.output)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _job_subdir = None  # user-specified path; don't auto-clean it up
+    else:
+        # Create a unique subdirectory under WACZ_OUTPUT_DIR so that concurrent
+        # archive.py jobs never share an output folder.  band_id is embedded for
+        # human readability when debugging; the PID + short UUID suffix makes it
+        # unique even when the same artist is queued more than once at a time.
+        _job_id = f"{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        output_dir = WACZ_OUTPUT_DIR / f"job_{_job_id}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _job_subdir = output_dir
+        logger.info("Job output directory: %s", output_dir)
+
+        def _cleanup_job_dir() -> None:
+            """Remove the auto-created job subdirectory if it is empty after upload."""
+            try:
+                _job_subdir.rmdir()  # only succeeds if empty; leaves dir intact on failure
+                logger.debug("Removed empty job directory: %s", _job_subdir)
+            except OSError:
+                # Non-empty (e.g. failed uploads left files behind) or already gone — ignore.
+                pass
+
+        atexit.register(_cleanup_job_dir)
 
     # ── List mode (raw URL list, no artist resolution) ────────────────────────
     if args.list is not None:
@@ -735,15 +791,26 @@ def main() -> None:
             # Single-release smart pipeline: check JSON, detect changes, crawl if needed.
             run_quick_pipeline(args.url, output_dir, logger, no_upload=args.no_upload)
         else:
-            did_work = run_smart_pipeline(
-                args.url, output_dir, logger,
-                skip_metadata=args.skip_metadata,
-                one_by_one=args.one_by_one,
-                no_upload=args.no_upload,
-            )
-            # In one_by_one mode uploads happen inside the pipeline per-release
-            if did_work and not args.one_by_one:
-                run_upload(output_dir, args.no_upload, logger)
+            # Group URLs by artist so the smart pipeline (which processes one
+            # artist at a time) can be called once per artist.
+            artist_groups = _group_urls_by_artist(args.url, logger)
+            if len(artist_groups) > 1:
+                logger.info(
+                    "Multiple artists detected (%d) — running smart pipeline for each.",
+                    len(artist_groups),
+                )
+            for i, (band_id, (artist_root, artist_urls)) in enumerate(artist_groups.items(), 1):
+                if len(artist_groups) > 1:
+                    print(f"\n── Artist {i}/{len(artist_groups)} (band_id={band_id}) ──────────────────────────")
+                did_work = run_smart_pipeline(
+                    artist_urls, output_dir, logger,
+                    skip_metadata=args.skip_metadata,
+                    one_by_one=args.one_by_one,
+                    no_upload=args.no_upload,
+                )
+                # In one_by_one mode uploads happen inside the pipeline per-release
+                if did_work and not args.one_by_one:
+                    run_upload(output_dir, args.no_upload, logger)
         return
 
     parser.print_help()

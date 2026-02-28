@@ -1,0 +1,31 @@
+[Unit]
+Description=Bandcamp WACZ email watcher
+After=network-online.target graphical-session.target
+Wants=network-online.target graphical-session.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Pass the desktop session bus through so notify-send works from the
+# tmux pane even though the service was started non-interactively.
+PassEnvironment=DBUS_SESSION_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY
+
+# Replace both occurrences of the project path and the Python path with your own.
+# The project path is the root of this repository (where archive.py lives).
+# The Python path is either your venv interpreter or the system Python.
+#
+# Example (venv):
+#   project : /home/youruser/bandcamp-wacz-archiver
+#   python  : /home/youruser/bandcamp-wacz-archiver/.venv/bin/python
+#
+# Example (system Python, no venv):
+#   project : /home/youruser/bandcamp-wacz-archiver
+#   python  : /usr/bin/python
+#
+# The ExecStart line must stay as a single unbroken line — do not wrap it.
+ExecStart=/usr/bin/tmux new-session -A -d -s bandcamp-watcher -c /path/to/project /path/to/python bandcamp_wacz/email_watcher.py --notify
+ExecStop=/usr/bin/tmux kill-session -t bandcamp-watcher
+
+[Install]
+WantedBy=default.target

@@ -135,6 +135,35 @@ RECONNECT_DELAY = 30
 IDLE_TIMEOUT    = 25 * 60  # re-issue IDLE every 25 min (RFC recommends < 29 min)
 
 
+# ── Desktop notifications ─────────────────────────────────────────────────────
+
+class NotifyHandler(logging.Handler):
+    """
+    Logging handler that fires a desktop notification (via notify-send) for
+    every ERROR or CRITICAL log record.  Silently does nothing if notify-send
+    is not on PATH or if no display session is available (e.g. a headless run).
+    Enable with --notify on the command line.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno < logging.ERROR:
+            return
+        try:
+            import shutil, subprocess as _sp
+            if not shutil.which("notify-send"):
+                return
+            urgency = "critical" if record.levelno >= logging.CRITICAL else "normal"
+            summary = f"Bandcamp Watcher — {record.levelname}"
+            body    = self.format(record)[:200]  # notify-send truncates long bodies anyway
+            _sp.run(
+                ["notify-send", "-u", urgency, "-a", "bandcamp-watcher", summary, body],
+                timeout=5,
+                capture_output=True,
+            )
+        except Exception:
+            pass  # never let the notification handler crash the watcher
+
+
 # ── Email parsing ─────────────────────────────────────────────────────────────
 
 def _strip_query(url: str) -> str:
@@ -546,6 +575,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--notify",
+        action="store_true",
+        help=(
+            "Send a desktop notification (via notify-send) whenever an ERROR or "
+            "CRITICAL message is logged. Requires libnotify and an active desktop "
+            "session. No-op if notify-send is not on PATH."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable verbose debug logging (also passed through to archive.py).",
@@ -557,6 +595,14 @@ def main() -> None:
         format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    if args.notify:
+        _notify_handler = NotifyHandler()
+        _notify_handler.setFormatter(logging.Formatter(
+            "%(asctime)s  %(name)s  %(message)s", datefmt="%H:%M:%S"
+        ))
+        logging.getLogger().addHandler(_notify_handler)
+        logging.getLogger(__name__).info("Desktop notifications enabled (notify-send).")
 
     watch(no_upload=args.no_upload, dry_run=args.dry_run, debug=args.debug, lax=args.lax, force_full=args.full, one_by_one=not args.no_one_by_one)
 

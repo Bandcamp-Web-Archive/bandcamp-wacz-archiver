@@ -120,6 +120,26 @@ python archive.py --url https://someartist.bandcamp.com/
 
 Discovers every release on the artist's page, fetches metadata for all of them, and archives any that have not yet been archived. For large discographies, `--one-by-one` uploads each release immediately after crawling it to keep disk usage low.
 
+### Use a slug instead of a full URL
+
+```bash
+python archive.py --slug someartist
+```
+
+Expanded to `https://someartist.bandcamp.com/` automatically. Accepts multiple slugs to archive several artists in one command:
+
+```bash
+python archive.py --slug artistone artisttwo artistthree --one-by-one
+```
+
+### Archive multiple artists in one command
+
+```bash
+python archive.py --url https://artistone.bandcamp.com/ https://artisttwo.bandcamp.com/
+```
+
+The smart pipeline runs once per artist in sequence. A progress header is printed between artists.
+
 ### Skip uploading (crawl only)
 
 ```bash
@@ -170,8 +190,9 @@ bandcamp-wacz-archiver/
 │       └── bandcamp-dump.lst
 │
 ├── wacz_output/             ← created on first run
-│   ├── Album Title [item_id].wacz
-│   └── Album Title [item_id].json
+│   └── job_{pid}_{hex}/     ← per-job subdirectory (auto-created, auto-cleaned)
+│       ├── Album Title [item_id].wacz
+│       └── Album Title [item_id].json
 │
 ├── .env                     ← your local config (never committed)
 └── .env.example             ← template
@@ -320,8 +341,8 @@ python archive.py --url https://someartist.bandcamp.com/ --one-by-one
 
 ```bash
 python archive.py --url https://someartist.bandcamp.com/ --no-upload
-# ... review the WACZs ...
-python upload.py wacz_output/
+# ... review the WACZs in wacz_output/job_*/ ...
+python upload.py wacz_output/job_<pid>_<hex>/
 ```
 
 ### Re-queue a release whose WACZ was deleted
@@ -365,7 +386,6 @@ Each item contains two files: the `.wacz` archive and a `.json` sidecar with the
 - **Pre-orders**: Pre-order pages are archived as-is. Tracks that are locked before release will not have audio in the WACZ. `update_metadata.py` detects when `is_preorder` changes to `False` and re-queues the release automatically.
 - **Custom domains**: Artists who use a custom domain instead of `artist.bandcamp.com` may not be detected or parsed correctly in all cases.
 - **Rate limiting**: The configurable request delay (`BC_REQUEST_DELAY`) helps avoid triggering Bandcamp's rate limiter. If you see frequent 429 errors, increase the delay.
-- **Single-release artists**: Artists with only one release and no `/music` grid page are handled but may require passing the album URL directly rather than the artist root.
 
 ---
 
