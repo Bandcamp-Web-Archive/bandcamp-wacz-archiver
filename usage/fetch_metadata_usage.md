@@ -37,8 +37,8 @@ artists/
       "art_id": 737321838,
       "is_preorder": false,
       "datePublished": "02 Jan 2026 17:48:23 GMT",
-      "about": "Album description text…",
-      "credits": "Mastered by…",
+      "about": "Album description text...",
+      "credits": "Mastered by...",
       "license": "all rights reserved",
       "coverUrl_0": "https://f4.bcbits.com/img/a0737321838_0",
       "trackinfo": [

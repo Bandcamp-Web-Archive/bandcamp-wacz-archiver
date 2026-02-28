@@ -261,7 +261,7 @@ def _idle(imap: imaplib.IMAP4_SSL, timeout: int) -> None:
 
     # Borrow imaplib's tag so it stays in sync with its internal counter
     tag = imap._new_tag().decode()
-    logger.debug("Entering IMAP IDLE tag=%s (timeout=%ds)…", tag, timeout)
+    logger.debug("Entering IMAP IDLE tag=%s (timeout=%ds)...", tag, timeout)
     imap.send(f"{tag} IDLE\r\n".encode())
     imap.readline()  # consume "+ idling" continuation
 
@@ -316,7 +316,7 @@ def _run_pipeline(
     one_by_one: bool = True,
 ) -> bool:
     """
-    Invoke archive.py --url <urls…> as a subprocess.
+    Invoke archive.py --url <urls...> as a subprocess.
 
     Passes ``--quick`` when:
       - ``force_full`` is False, AND
@@ -483,7 +483,7 @@ def watch(no_upload: bool = False, dry_run: bool = False, debug: bool = False, l
     while True:
         imap = None
         try:
-            logger.info("Connecting to %s:%d…", IMAP_SERVER, IMAP_PORT)
+            logger.info("Connecting to %s:%d...", IMAP_SERVER, IMAP_PORT)
             imap = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
             # General command timeout — prevents any IMAP call from hanging forever.
             # IDLE overrides this with its own longer timeout during the wait loop.
@@ -505,13 +505,13 @@ def watch(no_upload: bool = False, dry_run: bool = False, debug: bool = False, l
             logger.info("Shutting down.")
             break
         except imaplib.IMAP4.abort as exc:
-            logger.warning("Connection aborted: %s — reconnecting in %ds…", exc, RECONNECT_DELAY)
+            logger.warning("Connection aborted: %s — reconnecting in %ds...", exc, RECONNECT_DELAY)
         except imaplib.IMAP4.error as exc:
-            logger.error("IMAP error: %s — reconnecting in %ds…", exc, RECONNECT_DELAY)
+            logger.error("IMAP error: %s — reconnecting in %ds...", exc, RECONNECT_DELAY)
         except OSError as exc:
-            logger.error("Network error: %s — reconnecting in %ds…", exc, RECONNECT_DELAY)
+            logger.error("Network error: %s — reconnecting in %ds...", exc, RECONNECT_DELAY)
         except Exception as exc:
-            logger.error("Unexpected error: %s — reconnecting in %ds…", exc, RECONNECT_DELAY, exc_info=True)
+            logger.error("Unexpected error: %s — reconnecting in %ds...", exc, RECONNECT_DELAY, exc_info=True)
         finally:
             if imap:
                 try:

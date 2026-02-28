@@ -112,7 +112,7 @@ assert len(r.encode('utf-8')) <= 60, f'Too long: {len(r.encode())} bytes'
 
 # Middle style
 r = truncate_filename('Start and then some long bit and then End', ' [123].wacz', 40, 'middle')
-assert '…' in r, 'No ellipsis in middle truncation'
+assert '...' in r, 'No ellipsis in middle truncation'
 assert len(r.encode('utf-8')) <= 40
 
 # Hash style
@@ -249,9 +249,10 @@ python archive.py --check-podman
 ```bash
 python archive.py --dumb --url https://someartist.bandcamp.com/album/some-album --no-upload
 ```
-- [ ] `wacz_output/` contains `<Title> [item_id].wacz`
-- [ ] WACZ contains `datapackage.json` — `python3 -c "import zipfile; print(zipfile.ZipFile('wacz_output/...wacz').namelist())"`
+- [ ] A `wacz_output/job_<pid>_<hex>/` subdirectory was created and contains `<Title> [item_id].wacz`
+- [ ] WACZ contains `datapackage.json` — `python3 -c "import zipfile; print(zipfile.ZipFile('wacz_output/job_*/...wacz').namelist())"`
 - [ ] No artist JSON was created or modified — `ls artists/` is empty or unchanged
+- [ ] The job subdirectory is removed automatically after the process exits (it is empty after `--no-upload` only if files were cleaned up; with `--dumb --no-upload` the WACZ remains and the dir is kept)
 
 ### 5.3 Smart mode — new artist
 
@@ -261,10 +262,11 @@ Use a small artist (1–3 releases) and `IA_COLLECTION=test_collection`:
 python archive.py --url https://smallartist.bandcamp.com/ --no-upload
 ```
 - [ ] `fetch_metadata.py` ran (log: "No artist folder found - running fetch_metadata")
-- [ ] WACZ file(s) written to `wacz_output/`
+- [ ] A `wacz_output/job_<pid>_<hex>/` subdirectory was created containing the WACZ file(s)
 - [ ] `datapackage.json` inside the WACZ contains `bandcamp_band_id`, `bandcamp_item_id`, `bandcamp_ia_identifier`
 - [ ] Artist JSON shows `archived: true` and `archived_at` timestamp for crawled releases
-- [ ] Sidecar `.json` exists alongside each `.wacz`
+- [ ] Sidecar `.json` exists alongside each `.wacz` in the job subdirectory
+- [ ] Job subdirectory is removed automatically after upload (empty on success)
 
 ### 5.4 Smart mode — known artist (update path)
 
@@ -293,7 +295,7 @@ Use an artist with 2+ unarchived releases:
 python archive.py --url https://smallartist.bandcamp.com/ --one-by-one --no-upload
 ```
 - [ ] Log alternates: crawl → upload → crawl → upload (rather than all crawls then all uploads)
-- [ ] At no point do more than one WACZ file exist simultaneously in `wacz_output/` (verify with a second terminal watching `ls -lh wacz_output/`)
+- [ ] At no point do more than one WACZ file exist simultaneously in the job subdirectory (verify with a second terminal watching `ls -lh wacz_output/job_*/`)
 
 ### 5.7 `--list` mode
 
@@ -322,7 +324,7 @@ sleep 10
 kill -INT $PID
 ```
 - [ ] Process exits cleanly
-- [ ] No `.wacz.tmp` temp files left in `wacz_output/`
+- [ ] No `.wacz.tmp` temp files left in the job subdirectory (`wacz_output/job_*/`)
 - [ ] No orphaned container running: `podman ps` (or `docker ps`) should be empty
 
 ---
@@ -336,7 +338,7 @@ These are exercised automatically by the crawl tests above, but verify explicitl
 ```bash
 python3 -c "
 import zipfile, json
-wacz = next(__import__('pathlib').Path('wacz_output').glob('*.wacz'))
+wacz = next(__import__('pathlib').Path('wacz_output').rglob('*.wacz'))
 pkg = json.loads(zipfile.ZipFile(wacz).read('datapackage.json'))
 assert 'bandcamp_band_id' in pkg
 assert 'bandcamp_item_id' in pkg
@@ -352,7 +354,7 @@ print('PASS:', pkg['bandcamp_ia_identifier'])
 python3 -c "
 import json
 from pathlib import Path
-for p in Path('wacz_output').glob('*.json'):
+for p in Path('wacz_output').rglob('*.json'):
     data = json.loads(p.read_text())
     assert 'ia_identifier' in data, f'Missing ia_identifier in {p.name}'
     assert 'band_id' in data
@@ -453,7 +455,7 @@ python bandcamp_wacz/extract.py wacz_output/Some\ Album\ \[12345\].wacz --ask
 ### 8.1 Dry run
 
 ```bash
-python upload.py wacz_output/ --dry-run
+python upload.py wacz_output/job_<pid>_<hex>/job_<pid>_<hex>/ --dry-run
 ```
 - [ ] Prints identifier and all metadata fields for each WACZ
 - [ ] Nothing is uploaded — confirm by checking that the identifier does not appear at `https://archive.org/details/<identifier>`
@@ -462,7 +464,7 @@ python upload.py wacz_output/ --dry-run
 ### 8.2 Real upload
 
 ```bash
-python upload.py wacz_output/Some\ Album\ \[12345\].wacz
+python upload.py wacz_output/job_<pid>_<hex>/Some\ Album\ \[12345\].wacz
 ```
 - [ ] Upload log shows HTTP 200 responses for both `.wacz` and `.json`
 - [ ] Item appears at `https://archive.org/details/<ia_identifier>` within a few minutes
@@ -477,7 +479,7 @@ Manually remove `ia_identifier` from a sidecar JSON and confirm the error path:
 ```bash
 python3 -c "
 import json; from pathlib import Path
-p = next(Path('wacz_output').glob('*.json'))
+p = next(Path('wacz_output').rglob('*.json'))
 d = json.loads(p.read_text())
 del d['ia_identifier']
 p.write_text(json.dumps(d))
@@ -626,7 +628,7 @@ print('PASS')
 "
 ```
 - [ ] `--quick` is in the command for a known artist
-- [ ] `--one-by-one` is not
+- [ ] `--one-by-one` is not — it only applies to the full pipeline (new artists)
 
 ### 9.6 `--no-one-by-one` flag respected
 
@@ -685,11 +687,12 @@ python archive.py --url https://smallartist.bandcamp.com/
 # Verify
 ```
 - [ ] `artists/` folder created with JSON and `.lst`
+- [ ] A `wacz_output/job_<pid>_<hex>/` subdirectory was created during the run
 - [ ] WACZ files created, then deleted after upload
 - [ ] Sidecar JSONs created, then deleted after upload
 - [ ] Artist JSON shows `archived: true`, `uploaded: true`, `ia_identifier` for every release
 - [ ] Items visible on archive.org under `test_collection`
-- [ ] `wacz_output/` is empty after everything completes
+- [ ] Job subdirectory is removed automatically after successful upload (`wacz_output/` itself remains)
 
 ### 10.2 Re-run is idempotent
 

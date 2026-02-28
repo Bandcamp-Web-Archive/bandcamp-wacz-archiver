@@ -157,7 +157,7 @@ class Bandcamp:
         if lo < 0 or hi < 0 or hi < lo:
             lo, hi = 1000.0, 3000.0
         sleep = random.uniform(lo, hi)
-        self.logger.info("Delaying %.0f ms …", sleep)
+        self.logger.info("Delaying %.0f ms ...", sleep)
         time.sleep(sleep / 1000)
 
     def _get(self, url: str, **kwargs) -> requests.Response:
@@ -170,7 +170,7 @@ class Bandcamp:
                     resp = self.session.get(url, headers=self.headers, timeout=BC_REQUEST_TIMEOUT, **kwargs)
                     if resp.status_code == 429:
                         wait = self.retry_delay * (attempt + 1)
-                        self.logger.warning("Rate-limited (429). Retrying in %ds … (%d/%d)", wait, attempt + 1, self.max_retries)
+                        self.logger.warning("Rate-limited (429). Retrying in %ds ... (%d/%d)", wait, attempt + 1, self.max_retries)
                         time.sleep(wait)
                         continue
                     resp.raise_for_status()
@@ -181,7 +181,7 @@ class Bandcamp:
                     last_exc = exc
                     if attempt < self.max_retries:
                         wait = self.retry_delay * (attempt + 1)
-                        self.logger.warning("Request failed (%s). Retry in %ds …", exc, wait)
+                        self.logger.warning("Request failed (%s). Retry in %ds ...", exc, wait)
                         time.sleep(wait)
                     else:
                         self.logger.error("All retries exhausted.")
@@ -711,7 +711,7 @@ def main() -> None:
             if primary_band_id:
                 print(f"  band_id: {primary_band_id}")
             else:
-                print("  band_id not found on primary page, trying first album URL…")
+                print("  band_id not found on primary page, trying first album URL...")
                 try:
                     album_resp = scraper._get(unique_urls[0])
                     album_soup = scraper._make_soup(album_resp.text)

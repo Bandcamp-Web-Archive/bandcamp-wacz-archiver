@@ -142,7 +142,7 @@ the configured delay:
 ```
   Verifying 87 identifiers on archive.org for Another Artist
   ETA: 43s  (0.5s between requests, up to 3 retries on network error)
-  [████████████░░░░░░░░░░░░░░░░]  22/87 ETA 33s  ✓  wacz-3873639194-1268523331-…
+  [████████████░░░░░░░░░░░░░░░░]  22/87 ETA 33s  ✓  wacz-3873639194-1268523331-...
 ```
 
 The ETA re-estimates after each request based on elapsed wall time, so it stays accurate

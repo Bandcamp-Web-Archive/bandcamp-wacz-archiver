@@ -96,7 +96,7 @@ def fetch_url(url: str, max_retries: int | None = None, retry_delay: int | None 
             resp = _session.get(url, headers={"User-Agent": USER_AGENT}, timeout=BC_REQUEST_TIMEOUT)
             if resp.status_code == 429:
                 wait = _retry_delay * (attempt + 1)
-                logger.warning("Rate-limited (429). Retrying in %ds …", wait)
+                logger.warning("Rate-limited (429). Retrying in %ds ...", wait)
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
@@ -105,7 +105,7 @@ def fetch_url(url: str, max_retries: int | None = None, retry_delay: int | None 
             last_exc = exc
             if attempt < _max_retries:
                 wait = _retry_delay * (attempt + 1)
-                logger.warning("Request failed (%s). Retry in %ds …", exc, wait)
+                logger.warning("Request failed (%s). Retry in %ds ...", exc, wait)
                 time.sleep(wait)
     raise last_exc or requests.RequestException(f"All retries exhausted for {url}")
 

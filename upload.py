@@ -245,7 +245,7 @@ def upload_release(wacz_path: Path, dry_run: bool) -> bool:
                 if attempt <= IA_MAX_RETRIES:
                     wait = IA_RETRY_DELAY * attempt
                     logger.warning(
-                        "Upload attempt %d/%d failed for %s: %s  — retrying in %ds…",
+                        "Upload attempt %d/%d failed for %s: %s  — retrying in %ds...",
                         attempt, IA_MAX_RETRIES + 1, identifier, exc, wait,
                     )
                     time.sleep(wait)
@@ -260,7 +260,7 @@ def upload_release(wacz_path: Path, dry_run: bool) -> bool:
         print()
         logger.warning("Upload interrupted for %s.", identifier)
         if item_created:
-            logger.warning("Partial upload detected - deleting IA item %s…", identifier)
+            logger.warning("Partial upload detected - deleting IA item %s...", identifier)
             try:
                 import internetarchive as _ia
                 _ia.delete(identifier, access_key=IA_ACCESS_KEY, secret_key=IA_SECRET_KEY,

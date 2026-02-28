@@ -127,7 +127,7 @@ For Gmail, `EMAIL_PASSWORD` should be an [App Password](https://support.google.c
 | Constant | Value | Description |
 |---|---|---|
 | `ARTISTS_DIR` | `{project_root}/artists/` | Root directory for per-artist data (not configurable via `.env`) |
-| `USER_AGENT` | `bandcamp-wacz-archiver/1.0 (…)` | User-Agent header sent with all plain HTTP requests. Not the browser UA used during crawls |
+| `USER_AGENT` | `bandcamp-wacz-archiver/1.0 (...)` | User-Agent header sent with all plain HTTP requests. Not the browser UA used during crawls |
 
 ---
 

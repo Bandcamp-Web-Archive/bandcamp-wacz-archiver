@@ -141,8 +141,9 @@ def apply_changes(existing: dict, fresh: dict, changed_fields: dict) -> dict:
     """
     Update existing album dict with new values for changed fields.
     Preserves STATE_FIELDS. Appends old values to _history.
-    Resets archived and uploaded to False so the album is re-queued for archival
-    and re-upload. Moves ia_identifier to history so the old IA item is traceable.
+    Resets archived, uploaded, archived_at, uploaded_at, and ia_identifier so
+    the album is re-queued for archival and re-upload. Moves the previous state
+    to history so the old IA item and timestamps are traceable.
     """
     now = datetime.now(timezone.utc).isoformat()
 
@@ -161,9 +162,11 @@ def apply_changes(existing: dict, fresh: dict, changed_fields: dict) -> dict:
             existing[field] = fresh.get(field)
 
     # Reset pipeline state so the updated release is re-queued for crawling and upload
-    existing["archived"]     = False
-    existing["uploaded"]     = False
-    existing["ia_identifier"] = None
+    existing["archived"]      = False
+    existing["uploaded"]      = False
+    existing["archived_at"]   = None
+    existing["uploaded_at"]   = None
+    existing["ia_identifier"]  = None
 
     return existing
 

@@ -283,7 +283,7 @@ def check_identifiers_on_ia(
                         backoff = delay * (2 ** attempt)   # exponential back-off
                         # Show a brief inline retry notice before sleeping
                         print(f"\r  {yellow('?')}  network error on {dim(ident[:45])} "
-                              f"— retry {attempt + 1}/{retries} in {backoff:.1f}s …"
+                              f"— retry {attempt + 1}/{retries} in {backoff:.1f}s ..."
                               + " " * 10,
                               end="", flush=True)
                         time.sleep(backoff)
@@ -382,7 +382,7 @@ def print_ia_results(
             print(f"    {yellow('?')}  {dim(r['identifier'])}{hist_tag}")
             print(f"        {dim(title_s)}")
         if len(neterr_records) > 5:
-            print(f"    {dim(f'… and {len(neterr_records) - 5} more')}")
+            print(f"    {dim(f'... and {len(neterr_records) - 5} more')}")
         print(f"  {dim('These are network failures, not confirmed missing. Re-run to retry.')}")
 
     if ghost_history:

@@ -30,6 +30,7 @@ import argparse
 import atexit
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import uuid
@@ -71,7 +72,7 @@ def check_podman() -> None:
     if result.returncode == 0:
         print("  Image is already available locally.")
     else:
-        print("  Image not found locally. Pulling now (this may take a while)…")
+        print("  Image not found locally. Pulling now (this may take a while)...")
         pull = subprocess.run(["podman", "pull", BROWSERTRIX_IMAGE])
         if pull.returncode != 0:
             print("  ERROR: could not pull image.")
@@ -441,12 +442,12 @@ def run_smart_pipeline(
     to_archive = _urls_to_archive(artist_folder)
     if not to_archive:
         if not no_upload and _has_unuploaded(artist_folder):
-            print("Nothing to crawl - all releases already archived. Proceeding to upload…")
+            print("Nothing to crawl - all releases already archived. Proceeding to upload...")
             return True
         print("Nothing to archive - all releases are already up to date.")
         return False
 
-    print(f"\nArchiving {len(to_archive)} release(s)…\n")
+    print(f"\nArchiving {len(to_archive)} release(s)...\n")
 
     ok: list[str] = []
     err: list[str] = []
@@ -644,7 +645,7 @@ def run_upload(output_dir, no_upload: bool, logger) -> None:
     if not wacz_files:
         logger.info("No WACZ files to upload.")
         return
-    logger.info("Uploading %d WACZ file(s)…", len(wacz_files))
+    logger.info("Uploading %d WACZ file(s)...", len(wacz_files))
     for wacz_path in wacz_files:
         try:
             _mod.upload_release(wacz_path, dry_run=False)
@@ -689,7 +690,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--filename-truncation", metavar="STYLE",
         choices=["end", "middle", "hash"], default=None,
         help="How to truncate filenames that exceed the archive.org 230-byte limit: "
-             "'end' (cut the title short), 'middle' (keep start and end with … in between), "
+             "'end' (cut the title short), 'middle' (keep start and end with ... in between), "
              "'hash' (replace title with a short SHA-1 digest). "
              "Overrides FILENAME_TRUNCATION in .env (default: end).")
     parser.add_argument("--debug", "-d", action="store_true",
@@ -734,13 +735,26 @@ def main() -> None:
         logger.info("Job output directory: %s", output_dir)
 
         def _cleanup_job_dir() -> None:
-            """Remove the auto-created job subdirectory if it is empty after upload."""
+            """Remove the auto-created job subdirectory if no .wacz or .json files remain."""
+            if not _job_subdir.exists():
+                return
+            # Safety check: abort if any WACZ or JSON files are still present.
+            # This means a crawl finished but upload didn't, so we leave the
+            # directory intact for the operator to handle manually.
+            leftover = list(_job_subdir.rglob("*.wacz")) + list(_job_subdir.rglob("*.json"))
+            if leftover:
+                logger.warning(
+                    "Job directory %s still contains %d file(s) — not deleting:\n  %s",
+                    _job_subdir,
+                    len(leftover),
+                    "\n  ".join(str(p) for p in leftover),
+                )
+                return
             try:
-                _job_subdir.rmdir()  # only succeeds if empty; leaves dir intact on failure
-                logger.debug("Removed empty job directory: %s", _job_subdir)
-            except OSError:
-                # Non-empty (e.g. failed uploads left files behind) or already gone — ignore.
-                pass
+                shutil.rmtree(_job_subdir)
+                logger.debug("Removed job directory: %s", _job_subdir)
+            except OSError as exc:
+                logger.warning("Could not remove job directory %s: %s", _job_subdir, exc)
 
         atexit.register(_cleanup_job_dir)
 

@@ -173,7 +173,7 @@ def crawl_album(album_url: str, output_dir: Optional[Path] = None, update_json: 
                 if attempt <= CRAWL_MAX_RETRIES:
                     wait = CRAWL_RETRY_DELAY * attempt
                     logger.warning(
-                        "Crawl attempt %d/%d failed for %s: %s  — retrying in %ds…",
+                        "Crawl attempt %d/%d failed for %s: %s  — retrying in %ds...",
                         attempt, CRAWL_MAX_RETRIES + 1, album_url, exc, wait,
                     )
                     try:
