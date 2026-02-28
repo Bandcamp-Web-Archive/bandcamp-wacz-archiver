@@ -6,12 +6,12 @@ Everything that should be verified before making the repository public. Work thr
 
 ## 0. Before You Start
 
-- [ ] `.env` is in `.gitignore` and does **not** appear in `git status`
-- [ ] `.env.example` contains no real credentials — only placeholder strings like `your_access_key_here`
-- [ ] `wacz_output/` is in `.gitignore` and contains no files
-- [ ] `artists/` is in `.gitignore` (or is empty) — no personal data in the repo
-- [ ] `git log --all --full-history -- .env` returns nothing (the file was never committed, even in an earlier commit)
-- [ ] Run `grep -r "IA_ACCESS_KEY\|IA_SECRET_KEY\|EMAIL_PASSWORD" --include="*.py" .` — result should be empty (no hardcoded credentials anywhere in source)
+- [x] `.env` is in `.gitignore` and does **not** appear in `git status`
+- [x] `.env.example` contains no real credentials — only placeholder strings like `your_access_key_here`
+- [x] `wacz_output/` is in `.gitignore` and contains no files
+- [x] `artists/` is in `.gitignore` (or is empty) — no personal data in the repo
+- [x] `git log --all --full-history -- .env` returns nothing (the file was never committed, even in an earlier commit)
+- [x] Run `grep -r "IA_ACCESS_KEY\|IA_SECRET_KEY\|EMAIL_PASSWORD" --include="*.py" .` — result should be empty (no hardcoded credentials anywhere in source)
 
 ---
 
@@ -22,23 +22,23 @@ Everything that should be verified before making the repository public. Work thr
 ```bash
 python3 -c "import requests, bs4, demjson3, dotenv, internetarchive, mutagen, lxml; print('OK')"
 ```
-- [ ] Prints `OK` with no import errors
+- [x] Prints `OK` with no import errors
 
 ### 1.2 Container runtime
 
 ```bash
 python archive.py --check-podman
 ```
-- [ ] Reports the Podman (or Docker) version correctly
-- [ ] Either confirms the Browsertrix image is already present, or pulls it without error
-- [ ] Exits with code 0
+- [x] Reports the Podman (or Docker) version correctly
+- [x] Either confirms the Browsertrix image is already present, or pulls it without error
+- [x] Exits with code 0
 
 ### 1.3 Config loading
 
 ```bash
 python -c "from bandcamp_wacz.config import *; print('band_id test:', BC_MAX_RETRIES, WACZ_OUTPUT_DIR)"
 ```
-- [ ] Prints values from your `.env`, not the defaults, confirming `.env` is being loaded
+- [x] Prints values from your `.env`, not the defaults, confirming `.env` is being loaded
 
 ---
 
@@ -51,7 +51,7 @@ Use a real, publicly accessible album URL for these.
 ```bash
 python3 -c "
 from bandcamp_wacz.bandcamp import parse_page
-r = parse_page('https://islandgirlvybz.bandcamp.com/album/fright-night-special')
+r = parse_page('https://wtc-communications.bandcamp.com/album/100-positive-feedback')
 print(r)
 assert r['band_id'] is not None, 'band_id missing'
 assert r['item_id'] is not None, 'item_id missing'
@@ -60,8 +60,8 @@ assert r['cover_url_0'] is not None, 'cover URL missing'
 print('PASS')
 "
 ```
-- [ ] Returns a dict with all five fields populated
-- [ ] `cover_url_0` ends with `_0` and contains no file extension
+- [x] Returns a dict with all five fields populated
+- [x] `cover_url_0` ends with `_0` and contains no file extension
 
 ### 2.2 Custom domain (Bucketheadland regression)
 
@@ -74,7 +74,7 @@ assert r['item_id'] is not None, 'item_id missing on custom domain'
 print('PASS:', r['artist'], '-', r['title'])
 "
 ```
-- [ ] Parses correctly — custom domain is not treated differently from `.bandcamp.com`
+- [x] Parses correctly — custom domain is not treated differently from `.bandcamp.com`
 
 ### 2.3 `create_safe_filename`
 
@@ -94,7 +94,7 @@ for inp, expected in cases:
 print('PASS')
 "
 ```
-- [ ] All cases pass
+- [x] All cases pass
 
 ### 2.4 `truncate_filename` — archive.org byte limit
 
@@ -112,7 +112,7 @@ assert len(r.encode('utf-8')) <= 60, f'Too long: {len(r.encode())} bytes'
 
 # Middle style
 r = truncate_filename('Start and then some long bit and then End', ' [123].wacz', 40, 'middle')
-assert '...' in r, 'No ellipsis in middle truncation'
+assert '…' in r, 'No ellipsis in middle truncation'
 assert len(r.encode('utf-8')) <= 40
 
 # Hash style
@@ -121,7 +121,7 @@ assert len(r.encode('utf-8')) <= 60
 print('PASS')
 "
 ```
-- [ ] All three truncation styles keep output within `max_bytes`
+- [x] All three truncation styles keep output within `max_bytes`
 
 ---
 
@@ -134,11 +134,11 @@ Use a small artist (few releases) to keep test time reasonable.
 ```bash
 python fetch_metadata.py https://islandgirlvybz.bandcamp.com/album/fright-night-special --debug
 ```
-- [ ] Creates `artists/` directory
-- [ ] Creates `artists/{Artist} [{band_id}]/` folder with correct name format
-- [ ] JSON file contains the album entry with `trackinfo`, `art_id`, `item_id`, `band_id`
-- [ ] `bandcamp-dump.lst` is written with the URL
-- [ ] No `.partial` file left behind after successful completion
+- [x] Creates `artists/` directory
+- [x] Creates `artists/{Artist} [{band_id}]/` folder with correct name format
+- [x] JSON file contains the album entry with `trackinfo`, `art_id`, `item_id`, `band_id`
+- [x] `bandcamp-dump.lst` is written with the URL
+- [x] No `.partial` file left behind after successful completion
 
 ### 3.2 Full discography via artist page
 
@@ -147,27 +147,27 @@ Use an artist with a small, known catalogue.
 ```bash
 python fetch_metadata.py https://islandgirlvybz.bandcamp.com/ --debug
 ```
-- [ ] Discovers all releases from the `/music` grid
-- [ ] Each release in the JSON has `trackinfo` populated (individual track pages were fetched)
-- [ ] `archived` is `false` for all entries
-- [ ] `_band_id` is present at the top level of the JSON
+- [x] Discovers all releases from the `/music` grid
+- [x] Each release in the JSON has `trackinfo` populated (individual track pages were fetched)
+- [x] `archived` is `false` for all entries
+- [x] `_band_id` is present at the top level of the JSON
 
 ### 3.3 Interruption and resume
 
 ```bash
 # Start a fetch of an artist with 5+ releases
-python fetch_metadata.py https://someartist.bandcamp.com/ &
+python fetch_metadata.py https://wtc-communications.bandcamp.com/music &
 PID=$!
-sleep 15  # let it fetch a few releases
+sleep 15
 kill $PID
 
 # Confirm partial file exists
 ls artists/*/  *.partial
 ```
-- [ ] A `.partial` file exists after the kill
-- [ ] Re-running the same command resumes: "Resuming from partial file — N release(s) already fetched" is printed
-- [ ] Final JSON contains all releases, no duplicates
-- [ ] `.partial` file is deleted after successful completion
+- [x] A `.partial` file exists after the kill
+- [x] Re-running the same command resumes: "Resuming from partial file — N release(s) already fetched" is printed
+- [x] Final JSON contains all releases, no duplicates
+- [x] `.partial` file is deleted after successful completion
 
 ### 3.4 `--band-id` override
 
@@ -190,8 +190,8 @@ Requires an existing artist JSON from section 3.
 ```bash
 python update_metadata.py https://someartist.bandcamp.com/ --dry-run
 ```
-- [ ] Reports `0 new, 0 updated` (or only shows new releases if there genuinely are some)
-- [ ] `--dry-run` writes nothing to disk — verify JSON `mtime` is unchanged
+- [x] Reports `0 new, 0 updated` (or only shows new releases if there genuinely are some)
+- [x] `--dry-run` writes nothing to disk — verify JSON `mtime` is unchanged
 
 ### 4.2 Simulated change detection
 
@@ -210,17 +210,17 @@ print('Corrupted:', p)
 
 python update_metadata.py https://someartist.bandcamp.com/ --dry-run
 ```
-- [ ] `--dry-run` reports `Would update 'Real Title': title`
-- [ ] Run without `--dry-run` — `_history` entry appears in the JSON with the old title
-- [ ] `archived` and `uploaded` are reset to `false` after the change
+- [x] `--dry-run` reports `Would update 'Real Title': title`
+- [x] Run without `--dry-run` — `_history` entry appears in the JSON with the old title
+- [x] `archived` and `uploaded` are reset to `false` after the change
 
 ### 4.3 `--release` mode
 
 ```bash
 python update_metadata.py https://someartist.bandcamp.com/album/some-album --release --dry-run
 ```
-- [ ] Only the one release is checked — no `/music` grid fetch logged
-- [ ] Correctly identifies whether it is new or existing
+- [x] Only the one release is checked — no `/music` grid fetch logged
+- [x] Correctly identifies whether it is new or existing
 
 ### 4.4 Multi-artist deduplication
 
@@ -229,7 +229,7 @@ python update_metadata.py \
   https://artist-a.bandcamp.com/album/x \
   https://artist-a.bandcamp.com/album/y
 ```
-- [ ] Only **one** update pass runs for artist-a, not two
+- [x] Only **one** update pass runs for artist-a, not two
 
 ---
 
@@ -242,17 +242,17 @@ python update_metadata.py \
 ```bash
 python archive.py --check-podman
 ```
-- [ ] Passes cleanly before any crawl test
+- [x] Passes cleanly before any crawl test
 
 ### 5.2 Dumb mode — bare crawl
 
 ```bash
 python archive.py --dumb --url https://someartist.bandcamp.com/album/some-album --no-upload
 ```
-- [ ] A `wacz_output/job_<pid>_<hex>/` subdirectory was created and contains `<Title> [item_id].wacz`
-- [ ] WACZ contains `datapackage.json` — `python3 -c "import zipfile; print(zipfile.ZipFile('wacz_output/job_*/...wacz').namelist())"`
-- [ ] No artist JSON was created or modified — `ls artists/` is empty or unchanged
-- [ ] The job subdirectory is removed automatically after the process exits (it is empty after `--no-upload` only if files were cleaned up; with `--dumb --no-upload` the WACZ remains and the dir is kept)
+- [x] A `wacz_output/job_<pid>_<hex>/` subdirectory was created and contains `<Title> [item_id].wacz`
+- [x] WACZ contains `datapackage.json` — `python3 -c "import zipfile; print(zipfile.ZipFile('wacz_output/job_*/...wacz').namelist())"`
+- [x] No artist JSON was created or modified — `ls artists/` is empty or unchanged
+- [x] The job subdirectory is removed automatically after the process exits (it is empty after `--no-upload` only if files were cleaned up; with `--dumb --no-upload` the WACZ remains and the dir is kept)
 
 ### 5.3 Smart mode — new artist
 
@@ -261,12 +261,12 @@ Use a small artist (1–3 releases) and `IA_COLLECTION=test_collection`:
 ```bash
 python archive.py --url https://smallartist.bandcamp.com/ --no-upload
 ```
-- [ ] `fetch_metadata.py` ran (log: "No artist folder found - running fetch_metadata")
-- [ ] A `wacz_output/job_<pid>_<hex>/` subdirectory was created containing the WACZ file(s)
-- [ ] `datapackage.json` inside the WACZ contains `bandcamp_band_id`, `bandcamp_item_id`, `bandcamp_ia_identifier`
-- [ ] Artist JSON shows `archived: true` and `archived_at` timestamp for crawled releases
-- [ ] Sidecar `.json` exists alongside each `.wacz` in the job subdirectory
-- [ ] Job subdirectory is removed automatically after upload (empty on success)
+- [x] `fetch_metadata.py` ran (log: "No artist folder found - running fetch_metadata")
+- [x] A `wacz_output/job_<pid>_<hex>/` subdirectory was created containing the WACZ file(s)
+- [x] `datapackage.json` inside the WACZ contains `bandcamp_band_id`, `bandcamp_item_id`, `bandcamp_ia_identifier`
+- [x] Artist JSON shows `archived: true` and `archived_at` timestamp for crawled releases
+- [x] Sidecar `.json` exists alongside each `.wacz` in the job subdirectory
+- [x] Job subdirectory is removed automatically after upload (empty on success)
 
 ### 5.4 Smart mode — known artist (update path)
 
@@ -275,17 +275,17 @@ Run the same command again immediately after 5.3:
 ```bash
 python archive.py --url https://smallartist.bandcamp.com/ --no-upload
 ```
-- [ ] Log shows "Artist folder found — running update_metadata" (not fetch_metadata)
-- [ ] Log shows "Nothing to archive — all releases are already up to date" (no second crawl)
+- [x] Log shows "Artist folder found — running update_metadata" (not fetch_metadata)
+- [x] Log shows "Nothing to archive — all releases are already up to date" (no second crawl)
 
 ### 5.5 Quick mode
 
 ```bash
 python archive.py --quick --url https://smallartist.bandcamp.com/album/some-album --no-upload
 ```
-- [ ] Does not fetch the `/music` grid (no "Discovering releases" in log)
-- [ ] If already `archived=true` and `uploaded=true`: skips with "already archived and uploaded"
-- [ ] If `archived=false`: crawls the release
+- [x] Does not fetch the `/music` grid (no "Discovering releases" in log)
+- [x] If already `archived=true` and `uploaded=true`: skips with "already archived and uploaded"
+- [x] If `archived=false`: crawls the release
 
 ### 5.6 `--one-by-one` mode
 
@@ -294,8 +294,8 @@ Use an artist with 2+ unarchived releases:
 ```bash
 python archive.py --url https://smallartist.bandcamp.com/ --one-by-one --no-upload
 ```
-- [ ] Log alternates: crawl → upload → crawl → upload (rather than all crawls then all uploads)
-- [ ] At no point do more than one WACZ file exist simultaneously in the job subdirectory (verify with a second terminal watching `ls -lh wacz_output/job_*/`)
+- [x] Log alternates: crawl → upload → crawl → upload (rather than all crawls then all uploads)
+- [x] At no point do more than one WACZ file exist simultaneously in the job subdirectory (verify with a second terminal watching `ls -lh wacz_output/job_*/`)
 
 ### 5.7 `--list` mode
 
@@ -323,9 +323,9 @@ PID=$!
 sleep 10
 kill -INT $PID
 ```
-- [ ] Process exits cleanly
-- [ ] No `.wacz.tmp` temp files left in the job subdirectory (`wacz_output/job_*/`)
-- [ ] No orphaned container running: `podman ps` (or `docker ps`) should be empty
+- [x] Process exits cleanly
+- [x] No `.wacz.tmp` temp files left in the job subdirectory (`wacz_output/job_*/`)
+- [x] No orphaned container running: `podman ps` (or `docker ps`) should be empty
 
 ---
 
@@ -346,7 +346,7 @@ assert 'bandcamp_ia_identifier' in pkg
 print('PASS:', pkg['bandcamp_ia_identifier'])
 "
 ```
-- [ ] All three fields present with correct values
+- [x] All three fields present with correct values
 
 ### 6.2 Sidecar JSON
 
@@ -362,7 +362,7 @@ for p in Path('wacz_output').rglob('*.json'):
     print('PASS:', p.name)
 "
 ```
-- [ ] Each `.json` sidecar has `ia_identifier`, `band_id`, and `trackinfo`
+- [x] Each `.json` sidecar has `ia_identifier`, `band_id`, and `trackinfo`
 
 ### 6.3 Artist JSON state
 
@@ -379,7 +379,7 @@ for p in Path('artists').glob('*/*.json'):
     print('PASS:', p.name)
 "
 ```
-- [ ] Every release with `archived: true` also has `archived_at`
+- [x] Every release with `archived: true` also has `archived_at`
 
 ---
 
@@ -466,11 +466,11 @@ python upload.py wacz_output/job_<pid>_<hex>/job_<pid>_<hex>/ --dry-run
 ```bash
 python upload.py wacz_output/job_<pid>_<hex>/Some\ Album\ \[12345\].wacz
 ```
-- [ ] Upload log shows HTTP 200 responses for both `.wacz` and `.json`
-- [ ] Item appears at `https://archive.org/details/<ia_identifier>` within a few minutes
-- [ ] Both files visible in the item's file list on archive.org
-- [ ] Local `.wacz` and `.json` are deleted after successful upload
-- [ ] Artist JSON updated: `uploaded: true`, `uploaded_at` timestamp present, `ia_identifier` matches
+- [x] Upload log shows HTTP 200 responses for both `.wacz` and `.json`
+- [x] Item appears at `https://archive.org/details/<ia_identifier>` within a few minutes
+- [x] Both files visible in the item's file list on archive.org
+- [x] Local `.wacz` and `.json` are deleted after successful upload
+- [x] Artist JSON updated: `uploaded: true`, `uploaded_at` timestamp present, `ia_identifier` matches
 
 ### 8.3 Identifier resolution fallback
 
@@ -531,9 +531,9 @@ assert urls[0] == 'https://music.bucketheadpikes.com/album/live-from-bucketstein
 print('PASS')
 "
 ```
-- [ ] Exactly 1 URL matched
-- [ ] Unsubscribe link not matched
-- [ ] Query string stripped correctly
+- [x] Exactly 1 URL matched
+- [x] Unsubscribe link not matched
+- [x] Query string stripped correctly
 
 ### 9.2 Sender and subject matching
 
@@ -561,7 +561,7 @@ assert _is_bandcamp_notification(msg3, lax=False) == False
 print('PASS')
 "
 ```
-- [ ] All four assertions pass
+- [x] All four assertions pass
 
 ### 9.3 `--dry-run` against a live inbox
 
@@ -570,11 +570,11 @@ Configure real IMAP credentials in `.env`, then plant a test message in your inb
 ```bash
 python bandcamp_wacz/email_watcher.py --dry-run --debug
 ```
-- [ ] Connects to IMAP successfully
-- [ ] Detects the test email
-- [ ] Logs `[DRY RUN] Would run pipeline for: [...]`
-- [ ] Email is **not** moved to Trash
-- [ ] No pipeline subprocess is spawned
+- [x] Connects to IMAP successfully
+- [x] Detects the test email
+- [x] Logs `[DRY RUN] Would run pipeline for: [...]`
+- [x] Email is **not** moved to Trash
+- [x] No pipeline subprocess is spawned
 
 ### 9.4 `--one-by-one` passed for new artists
 
@@ -686,13 +686,13 @@ python archive.py --url https://smallartist.bandcamp.com/
 
 # Verify
 ```
-- [ ] `artists/` folder created with JSON and `.lst`
-- [ ] A `wacz_output/job_<pid>_<hex>/` subdirectory was created during the run
-- [ ] WACZ files created, then deleted after upload
-- [ ] Sidecar JSONs created, then deleted after upload
-- [ ] Artist JSON shows `archived: true`, `uploaded: true`, `ia_identifier` for every release
-- [ ] Items visible on archive.org under `test_collection`
-- [ ] Job subdirectory is removed automatically after successful upload (`wacz_output/` itself remains)
+- [x] `artists/` folder created with JSON and `.lst`
+- [x] A `wacz_output/job_<pid>_<hex>/` subdirectory was created during the run
+- [x] WACZ files created, then deleted after upload
+- [x] Sidecar JSONs created, then deleted after upload
+- [x] Artist JSON shows `archived: true`, `uploaded: true`, `ia_identifier` for every release
+- [x] Items visible on archive.org under `test_collection`
+- [x] Job subdirectory is removed automatically after successful upload (`wacz_output/` itself remains)
 
 ### 10.2 Re-run is idempotent
 
@@ -701,9 +701,9 @@ Run the exact same command again immediately:
 ```bash
 python archive.py --url https://smallartist.bandcamp.com/
 ```
-- [ ] Logs "Nothing to archive — all releases are already up to date"
-- [ ] No new crawls, no new uploads
-- [ ] Artist JSON is unchanged
+- [x] Logs "Nothing to archive — all releases are already up to date"
+- [x] No new crawls, no new uploads
+- [x] Artist JSON is unchanged
 
 ### 10.3 Single-release artist
 
@@ -712,17 +712,17 @@ Find a Bandcamp artist with only one release and no `/music` page:
 ```bash
 python archive.py --url https://single-release-artist.bandcamp.com/album/only-album
 ```
-- [ ] Pipeline completes without erroring on missing music grid
-- [ ] Release is archived and uploaded
+- [x] Pipeline completes without erroring on missing music grid
+- [x] Release is archived and uploaded
 
 ### 10.4 Custom domain end-to-end
 
 ```bash
 python archive.py --url https://music.bucketheadpikes.com/album/live-from-bucketstein-manor --no-upload
 ```
-- [ ] `fetch_metadata.py` runs (or `update_metadata` if already known)
-- [ ] WACZ is produced with correct filename
-- [ ] Artist JSON created under `artists/Bucketheadland [3055507029]/` (or equivalent)
+- [x] `fetch_metadata.py` runs (or `update_metadata` if already known)
+- [x] WACZ is produced with correct filename
+- [x] Artist JSON created under `artists/Bucketheadland [3055507029]/` (or equivalent)
 
 ---
 
@@ -737,44 +737,44 @@ git diff --cached
 # Check the full commit history for anything sensitive
 git log --all -p | grep -i "access_key\|secret_key\|password\|token" | grep -v "example\|your_\|placeholder\|getenv\|os.environ"
 ```
-- [ ] No real credentials appear anywhere in git history
+- [x] No real credentials appear anywhere in git history
 
 ### 11.2 Permissions check on `.env`
 
 ```bash
 ls -la .env
 ```
-- [ ] Mode is `600` (readable only by owner), not `644`
+- [x] Mode is `600` (readable only by owner), not `644`
 
 ### 11.3 `USER_AGENT` is honest
 
 ```bash
 python3 -c "from bandcamp_wacz.config import USER_AGENT; print(USER_AGENT)"
 ```
-- [ ] Contains the real GitHub repository URL, not a placeholder
-- [ ] Identifies the tool honestly (not spoofing a browser)
+- [x] Contains the real GitHub repository URL, not a placeholder
+- [x] Identifies the tool honestly (not spoofing a browser)
 
 ### 11.4 `test_collection` removed before first real use
 
-- [ ] `IA_COLLECTION` in `.env.example` is `opensource_media` (or your intended collection), not `test_collection`
-- [ ] Your personal `.env` has `IA_COLLECTION` set correctly for production use
+- [x] `IA_COLLECTION` in `.env.example` is `opensource_media` (or your intended collection), not `test_collection`
+- [x] Your personal `.env` has `IA_COLLECTION` set correctly for production use
 
 ### 11.5 Default request delay is polite
 
 ```bash
 python3 -c "from bandcamp_wacz.config import BC_REQUEST_DELAY; print(BC_REQUEST_DELAY)"
 ```
-- [ ] Default is `1000-3000` ms (at least 1 second between requests)
-- [ ] `.env.example` documents what the values mean
+- [x] Default is `1000-3000` ms (at least 1 second between requests)
+- [x] `.env.example` documents what the values mean
 
 ---
 
 ## 12. Documentation
 
-- [ ] `README.md` renders correctly on GitHub (check locally with a Markdown previewer or push to a private repo first)
-- [ ] All links in `README.md` to `usage/*.md` files resolve correctly — no broken anchors
-- [ ] `.env.example` matches every variable referenced in `config.py` — run: `grep "os.getenv" bandcamp_wacz/config.py | grep -oP '"[A-Z_]+"' | sort` and compare against `.env.example`
-- [ ] `usage/` directory contains a `.md` file for every script
+- [x] `README.md` renders correctly on GitHub (check locally with a Markdown previewer or push to a private repo first)
+- [x] All links in `README.md` to `usage/*.md` files resolve correctly — no broken anchors
+- [x] `.env.example` matches every variable referenced in `config.py` — run: `grep "os.getenv" bandcamp_wacz/config.py | grep -oP '"[A-Z_]+"' | sort` and compare against `.env.example`
+- [x] `usage/` directory contains a `.md` file for every script
 - [ ] `--help` output is accurate for every script:
   ```bash
   python archive.py --help
