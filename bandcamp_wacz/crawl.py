@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from urllib.parse import parse_qs, urlparse
 from .bandcamp import parse_page, subdomain_from_url, create_safe_filename, truncate_filename
 from .config import (
     BROWSERTRIX_IMAGE, WACZ_OUTPUT_DIR,
@@ -40,7 +41,7 @@ def _build_crawl_config(album_url: str, cover_url_0: Optional[str]) -> str:
         seeds.append({"url": cover_url_0, "scopeType": "page"})
 
     seed_block = "".join(
-        f"  - url: {s['url']}\n    scopeType: {s['scopeType']}\n"
+        f"  - url: \"{s['url']}\"\n    scopeType: {s['scopeType']}\n"
         for s in seeds
     )
 
@@ -204,12 +205,26 @@ def crawl_album(album_url: str, output_dir: Optional[Path] = None, update_json: 
 
     # Step 2: write release JSON + mark archived in artist JSON (skipped in --dumb mode)
     if update_json:
-        if band_id and item_id:
-            process_archived_wacz(final_path, band_id=band_id, item_id=item_id)
+        # If the URL carries a ?label=<id> param, the release belongs to a label's
+        # JSON (band_id = label id), not the artist's own page. Override band_id so
+        # process_archived_wacz associates the WACZ with the correct artist JSON.
+        label_param = parse_qs(urlparse(album_url).query).get("label")
+        if label_param:
+            effective_band_id = int(label_param[0])
+            logger.info(
+                "Label URL detected — using label band_id=%s for metadata association "
+                "(page band_id=%s).",
+                effective_band_id, band_id,
+            )
+        else:
+            effective_band_id = band_id
+
+        if effective_band_id and item_id:
+            process_archived_wacz(final_path, band_id=effective_band_id, item_id=item_id)
         else:
             logger.warning(
                 "Skipping metadata step - band_id=%s item_id=%s (one or both missing).",
-                band_id, item_id,
+                effective_band_id, item_id,
             )
     else:
         logger.debug("Skipping metadata step (update_json=False).")

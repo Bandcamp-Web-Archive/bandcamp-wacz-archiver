@@ -36,7 +36,7 @@ import sys
 import time
 import random
 from typing import Union, List, Optional
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse, parse_qs
 
 import bs4
 import demjson3
@@ -357,8 +357,13 @@ class Bandcamp:
             art_url     = self._get_art_url(self.soup)          # _0.jpg variant
             band_id     = self.get_band_id(self.soup, page_json)
 
+            parsed_url = urlparse(url)
+            label_param = parse_qs(parsed_url.query).get("label")
+            clean_query = f"label={label_param[0]}" if label_param else ""
+            clean_url = parsed_url._replace(query=clean_query, fragment="").geturl()
+
             album = {
-                "url": url,
+                "url": clean_url,
                 "title": title,
                 "artist": artist,
                 "label": label,
@@ -376,7 +381,7 @@ class Bandcamp:
                 "trackinfo": [],
             }
 
-            base_url = urlparse(url)._replace(query="", fragment="").geturl()
+            base_url = clean_url
 
             for i, track_data in enumerate(tracks):
                 if track_data.get("file"):

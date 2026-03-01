@@ -93,6 +93,30 @@ def _find_artist_json(band_id: int) -> Optional[Path]:
     return None
 
 
+def _find_release_in_artist_json(band_id: int, item_id: int) -> Optional[dict]:
+    """Look up and return a release dict from the artist JSON by item_id."""
+    json_path = _find_artist_json(band_id)
+    if not json_path:
+        logger.warning("Could not find artist JSON for band_id=%s.", band_id)
+        return None
+
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.error("Could not read artist JSON: %s", exc)
+        return None
+
+    for key, releases in data.items():
+        if key.startswith("_") or not isinstance(releases, list):
+            continue
+        for release in releases:
+            if release.get("item_id") == item_id:
+                return release
+
+    logger.warning("item_id=%s not found in artist JSON for band_id=%s.", item_id, band_id)
+    return None
+
+
 def _mark_uploaded(band_id: int, item_id: int, identifier: str) -> None:
     """Set uploaded=True, uploaded_at, and ia_identifier on the album in the artist JSON."""
     json_path = _find_artist_json(band_id)
@@ -170,8 +194,42 @@ def upload_release(wacz_path: Path, dry_run: bool) -> bool:
     json_path = wacz_path.with_suffix(".json")
 
     if not json_path.exists():
-        logger.warning("No release JSON found for %s - skipping.", wacz_path.name)
-        return False
+        logger.warning(
+            "No sidecar JSON for %s — attempting to reconstruct from artist JSON.",
+            wacz_path.name,
+        )
+        datapackage = _read_wacz_datapackage(wacz_path)
+        band_id = datapackage.get("bandcamp_band_id")
+        item_id = datapackage.get("bandcamp_item_id")
+        identifier = datapackage.get("bandcamp_ia_identifier")
+
+        if not band_id or not item_id or not identifier:
+            logger.error(
+                "No sidecar and no usable datapackage for %s — skipping.",
+                wacz_path.name,
+            )
+            return False
+
+        album = _find_release_in_artist_json(int(band_id), int(item_id))
+        if not album:
+            logger.error(
+                "Could not find item_id=%s in artist JSON — skipping %s.",
+                item_id, wacz_path.name,
+            )
+            return False
+
+        # Reconstruct the sidecar using the same logic as metadata.py:
+        # strip archived/uploaded tracking fields, add band_id and ia_identifier.
+        reconstructed = {k: v for k, v in album.items() if k not in ("archived", "uploaded", "archived_at", "uploaded_at")}
+        reconstructed["band_id"]       = int(band_id)
+        reconstructed["ia_identifier"] = identifier
+
+        try:
+            json_path.write_text(json.dumps(reconstructed, indent=4, ensure_ascii=False), encoding="utf-8")
+            logger.info("Reconstructed sidecar JSON written: %s", json_path.name)
+        except OSError as exc:
+            logger.error("Could not write reconstructed sidecar JSON: %s", exc)
+            return False
 
     try:
         release = json.loads(json_path.read_text(encoding="utf-8"))
@@ -199,9 +257,11 @@ def upload_release(wacz_path: Path, dry_run: bool) -> bool:
     )
 
     if not identifier:
-        logger.error("No ia_identifier in %s or its datapackage.json - skipping.", json_path.name)
+        logger.error("No ia_identifier in %s or its datapackage.json - skipping.", wacz_path.name)
         return False
     metadata = _build_ia_metadata(release)
+
+    upload_files = [str(wacz_path), str(json_path)]
 
     logger.info("Uploading: %s → %s", wacz_path.name, identifier)
     if dry_run:
@@ -219,7 +279,7 @@ def upload_release(wacz_path: Path, dry_run: bool) -> bool:
                 session  = _ia_session()
                 item     = session.get_item(identifier)
                 response = item.upload(
-                    files=[str(wacz_path), str(json_path)],
+                    files=upload_files,
                     metadata=metadata,
                     checksum=True,
                     verbose=True,
