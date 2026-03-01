@@ -209,6 +209,9 @@ def _releases_missing_wacz(artist_folder: Path, output_dir: Path) -> list[dict]:
     """
     Return releases that are archived=True but have no WACZ file on disk
     and have not been uploaded yet. These need to be re-crawled.
+
+    Scans WACZ_OUTPUT_DIR recursively so that WACZs produced by previous
+    interrupted runs (which live in their own job subdirectories) are found.
     """
     import json as _json
     json_path = artist_folder / f"{artist_folder.name}.json"
@@ -219,10 +222,11 @@ def _releases_missing_wacz(artist_folder: Path, output_dir: Path) -> list[dict]:
     except Exception:
         return []
 
-    # Build a set of item_ids present in any wacz in the output dir
-    # (reads embedded datapackage.json first, falls back to filename parsing)
+    # Build a set of item_ids present in any WACZ anywhere under WACZ_OUTPUT_DIR,
+    # falling back to the current job output_dir if WACZ_OUTPUT_DIR doesn't exist.
+    search_root = WACZ_OUTPUT_DIR if WACZ_OUTPUT_DIR.exists() else output_dir
     present_item_ids: set[int] = set()
-    for wacz_path in output_dir.glob("*.wacz"):
+    for wacz_path in search_root.rglob("*.wacz"):
         item_id = _item_id_from_wacz(wacz_path)
         if item_id is not None:
             present_item_ids.add(item_id)
@@ -303,8 +307,10 @@ def run_smart_pipeline(
     output_dir: Path | None,
     logger: logging.Logger,
     skip_metadata: bool = False,
+    skip_update: bool = False,
     one_by_one: bool = False,
     no_upload: bool = False,
+    fetch_only: bool = False,
 ) -> None:
     """
     Full pipeline:
@@ -374,6 +380,8 @@ def run_smart_pipeline(
             )
             sys.exit(1)
         logger.info("Skipping metadata fetch/update (--skip-metadata).")
+    elif artist_json_exists and skip_update:
+        logger.info("Artist JSON is complete — skipping update_metadata (--skip-update).")
     elif artist_json_exists:
         logger.info("Artist folder found: %s - running update_metadata.", artist_folder.name)
         from update_metadata import update_artist
@@ -414,6 +422,11 @@ def run_smart_pipeline(
         if not artist_folder:
             logger.error("Artist folder still not found after fetch_metadata - aborting.")
             sys.exit(1)
+
+    # If fetch_only, stop here — crawling will happen in a separate pass.
+    if fetch_only:
+        logger.info("Metadata fetch complete for band_id=%s (--fetch-first).", band_id)
+        return False
 
     # Step 4: detect releases marked archived but with no WACZ file on disk
     missing = _releases_missing_wacz(artist_folder, output_dir)
@@ -460,7 +473,7 @@ def run_smart_pipeline(
             if isinstance(wacz, Path):
                 ok.append(url)
                 if not no_upload:
-                    run_upload(output_dir, no_upload=False, logger=logger)
+                    run_upload(output_dir, no_upload=False, logger=logger, artist_folder=artist_folder)
             else:
                 err.append(url)
                 logger.error("Failed: %s - %s", url, wacz)
@@ -476,9 +489,9 @@ def run_smart_pipeline(
         print("\n  Failed URLs:")
         for u in err:
             print(f"    {u}")
+    if err:
         sys.exit(1)
     return True
-
 
 
 def run_quick_pipeline(
@@ -626,11 +639,42 @@ def run_quick_pipeline(
 
         # ── Step 4: upload ────────────────────────────────────────────────────
         if not no_upload:
-            run_upload(output_dir, no_upload=False, logger=logger)
+            run_upload(output_dir, no_upload=False, logger=logger, artist_folder=folder)
 
 
-def run_upload(output_dir, no_upload: bool, logger) -> None:
-    """Upload all finished WACZs in the output directory."""
+def _get_unuploaded_item_ids(artist_folder: Path) -> list[int]:
+    """Return item_ids for releases that are archived but not yet uploaded."""
+    import json as _json
+    json_path = artist_folder / f"{artist_folder.name}.json"
+    if not json_path.exists():
+        return []
+    try:
+        data = _json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    ids = []
+    for key, releases in data.items():
+        if key.startswith("_") or not isinstance(releases, list):
+            continue
+        for r in releases:
+            if r.get("archived") and not r.get("uploaded"):
+                item_id = r.get("item_id")
+                if item_id:
+                    ids.append(int(item_id))
+    return ids
+
+
+def run_upload(output_dir, no_upload: bool, logger, artist_folder: Path | None = None) -> None:
+    """Upload all finished WACZs for the current run.
+
+    Search strategy:
+      1. Flat glob of the current job's output_dir — covers the normal case.
+      2. If nothing found and artist_folder is known, search WACZ_OUTPUT_DIR
+         recursively but only for the specific [item_id].wacz patterns of
+         releases that are archived-but-not-uploaded. This recovers WACZs
+         from a previous interrupted job without risking picking up files
+         from a concurrently running job.
+    """
     if no_upload:
         logger.info("Skipping upload (--no-upload).")
         return
@@ -639,9 +683,34 @@ def run_upload(output_dir, no_upload: bool, logger) -> None:
     _spec = importlib.util.spec_from_file_location("upload", _upload_path)
     _mod = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_mod)
-    from bandcamp_wacz.config import WACZ_OUTPUT_DIR as _DEFAULT_OUT
-    search_dir = output_dir or _DEFAULT_OUT
-    wacz_files = _mod.collect_wacz_files([str(search_dir)])
+
+    # Step 1: check current job dir
+    wacz_files = sorted(output_dir.glob("*.wacz"))
+
+    # Step 2: targeted search by item_id across WACZ_OUTPUT_DIR for any that
+    # weren't found in the job dir — covers WACZs from previous interrupted runs.
+    if artist_folder and WACZ_OUTPUT_DIR.exists():
+        item_ids = _get_unuploaded_item_ids(artist_folder)
+        found_item_ids = set()
+        for wacz_path in wacz_files:
+            item_id = _item_id_from_wacz(wacz_path)
+            if item_id is not None:
+                found_item_ids.add(item_id)
+        missing_ids = [iid for iid in item_ids if iid not in found_item_ids]
+        if missing_ids:
+            logger.debug(
+                "%d WACZ(es) not in job dir — searching %s for specific item_id(s).",
+                len(missing_ids), WACZ_OUTPUT_DIR,
+            )
+            seen = {p for p in wacz_files}
+            for item_id in missing_ids:
+                suffix = f"[{item_id}].wacz"
+                for wacz_path in WACZ_OUTPUT_DIR.rglob("*.wacz"):
+                    if wacz_path.name.endswith(suffix) and wacz_path not in seen:
+                        seen.add(wacz_path)
+                        wacz_files.append(wacz_path)
+            wacz_files.sort()
+
     if not wacz_files:
         logger.info("No WACZ files to upload.")
         return
@@ -651,6 +720,194 @@ def run_upload(output_dir, no_upload: bool, logger) -> None:
             _mod.upload_release(wacz_path, dry_run=False)
         except KeyboardInterrupt:
             raise KeyboardInterrupt() from None
+
+
+
+# ── JSON mode helpers ─────────────────────────────────────────────────────────
+
+def _scan_artists_for_pending(artists_dir: Path) -> list[dict]:
+    """
+    Scan artists_dir for JSONs that have work remaining, or partial fetches.
+    Returns a list of dicts with keys: folder, band_id, name, n_uncrawled, n_unuploaded, partial.
+    """
+    import json as _json
+    import re as _re
+
+    pending = []
+    if not artists_dir.exists():
+        return pending
+
+    for folder in sorted(artists_dir.iterdir()):
+        if not folder.is_dir():
+            continue
+
+        m = _re.search(r'\[(\d+)\]$', folder.name)
+        band_id = int(m.group(1)) if m else None
+
+        json_path = folder / f"{folder.name}.json"
+        partial_path = folder / f"{folder.name}.json.partial"
+
+        # Partial fetch in progress — no full JSON yet
+        if not json_path.exists():
+            if partial_path.exists():
+                pending.append({
+                    "folder":       folder,
+                    "band_id":      band_id,
+                    "name":         folder.name,
+                    "n_uncrawled":  0,
+                    "n_unuploaded": 0,
+                    "partial":      True,
+                })
+            continue
+
+        try:
+            data = _json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        n_uncrawled = 0
+        n_unuploaded = 0
+        for key, releases in data.items():
+            if key.startswith("_") or not isinstance(releases, list):
+                continue
+            for r in releases:
+                if not r.get("archived"):
+                    n_uncrawled += 1
+                elif not r.get("uploaded"):
+                    n_unuploaded += 1
+
+        if n_uncrawled > 0 or n_unuploaded > 0 or partial_path.exists():
+            pending.append({
+                "folder":       folder,
+                "band_id":      band_id,
+                "name":         folder.name,
+                "n_uncrawled":  n_uncrawled,
+                "n_unuploaded": n_unuploaded,
+                "partial":      partial_path.exists(),
+            })
+
+    return pending
+
+
+def _prompt_json_selection(pending: list[dict]) -> list[dict]:
+    """
+    Show pending artists and let the user pick which ones to run.
+    Returns the selected subset.
+    """
+    print("\nArtists with pending work:\n")
+    for i, p in enumerate(pending, 1):
+        parts = []
+        if p["partial"]:
+            parts.append("fetch incomplete")
+        if p["n_uncrawled"]:
+            parts.append(f"{p['n_uncrawled']} to crawl")
+        if p["n_unuploaded"]:
+            parts.append(f"{p['n_unuploaded']} to upload")
+        print(f"  {i:>3}.  {p['name']}")
+        print(f"          {', '.join(parts)}")
+
+    print(f"\n  all.  Run all of the above ({len(pending)} artists)")
+    print(f"    q.  Quit\n")
+
+    while True:
+        try:
+            raw = input("Select artists (e.g. 1,3,5 or 'all'): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            sys.exit(0)
+
+        if raw == "q":
+            sys.exit(0)
+
+        if raw == "all":
+            return pending
+
+        selected = []
+        valid = True
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if not part.isdigit():
+                print(f"  Invalid input '{part}' — enter numbers, ranges, or 'all'.")
+                valid = False
+                break
+            idx = int(part) - 1
+            if idx < 0 or idx >= len(pending):
+                print(f"  Number {part} is out of range.")
+                valid = False
+                break
+            selected.append(pending[idx])
+
+        if valid and selected:
+            return selected
+
+        if valid:
+            print("  No artists selected.")
+
+
+def _run_pipeline_for_folder(
+    artist_folder: Path,
+    output_dir: Path,
+    logger: logging.Logger,
+    one_by_one: bool = False,
+    no_upload: bool = False,
+) -> bool:
+    """
+    Run the crawl + upload pipeline for an already-fetched artist folder,
+    skipping all URL resolution and metadata fetching.
+    Mirrors steps 4-5 of run_smart_pipeline.
+    """
+    # Detect releases marked archived but with no WACZ on disk
+    missing = _releases_missing_wacz(artist_folder, output_dir)
+    if missing:
+        logger.warning(
+            "%d release(s) marked archived but WACZ file missing — re-queuing:",
+            len(missing),
+        )
+        for r in missing:
+            logger.warning("  %s (item_id=%s)", r.get("title"), r.get("item_id"))
+        _reset_archived(artist_folder, [r["item_id"] for r in missing if r.get("item_id")])
+
+    to_archive = _urls_to_archive(artist_folder)
+    if not to_archive:
+        if not no_upload and _has_unuploaded(artist_folder):
+            print("Nothing to crawl - all releases already archived. Proceeding to upload...")
+            return True
+        print("Nothing to archive - all releases are already up to date.")
+        return False
+
+    print(f"\nArchiving {len(to_archive)} release(s)...\n")
+
+    ok: list[str] = []
+    err: list[str] = []
+
+    if one_by_one:
+        for i, url in enumerate(to_archive, 1):
+            print(f"[{i}/{len(to_archive)}] {url}")
+            result = crawl_list([url], output_dir=output_dir, skip_errors=True)
+            wacz = next(iter(result.values()))
+            if isinstance(wacz, Path):
+                ok.append(url)
+                if not no_upload:
+                    run_upload(output_dir, no_upload=False, logger=logger, artist_folder=artist_folder)
+            else:
+                err.append(url)
+                logger.error("Failed: %s - %s", url, wacz)
+    else:
+        results = crawl_list(to_archive, output_dir=output_dir, skip_errors=True)
+        ok  = [u for u, v in results.items() if isinstance(v, Path)]
+        err = [u for u, v in results.items() if isinstance(v, Exception)]
+
+    print(f"\n── Summary ────────────────────────────────────────")
+    print(f"  Succeeded : {len(ok)}")
+    print(f"  Failed    : {len(err)}")
+    if err:
+        print("\n  Failed URLs:")
+        for u in err:
+            print(f"    {u}")
+
+    return len(ok) > 0
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -670,6 +927,10 @@ def build_parser() -> argparse.ArgumentParser:
              "Expanded to https://<slug>.bandcamp.com/ before processing.")
     source.add_argument("--list", "-l", nargs="?", const=DEFAULT_LIST_FILE, metavar="FILE",
         help=f"Archive all URLs in FILE directly (default: {DEFAULT_LIST_FILE}).")
+    source.add_argument("--json", "-j", action="store_true",
+        help="Scan the artists/ directory for artists with releases still to crawl or upload, "
+             "present a numbered list, and let you pick which to resume. "
+             "Skips metadata fetching by default — combine with --fetch-first to update first.")
     parser.add_argument("--quick", action="store_true",
         help="Single-release smart pipeline: check JSON for changes, skip if already archived+uploaded, "
              "update _history if changed, add to JSON if new, then crawl and upload.")
@@ -681,6 +942,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verify Podman and the Browsertrix image are available, then exit.")
     parser.add_argument("--keep-on-error", action="store_true",
         help="Abort list processing on first error instead of skipping.")
+    parser.add_argument("--fetch-first", action="store_true",
+        help="Fetch metadata for all artists before starting any crawling. "
+             "Useful when archiving multiple artists at once so all JSONs are "
+             "up to date before the first crawl begins.")
+    parser.add_argument("--skip-update", action="store_true",
+        help="Skip update_metadata for artists whose JSON is already complete. "
+             "Incomplete or missing JSONs are still fetched. "
+             "Useful when you know metadata is current and want to go straight to crawling.")
     parser.add_argument("--skip-metadata", action="store_true",
         help="Skip fetch/update metadata step and archive only what is already queued (archived=False).")
     parser.add_argument("--one-by-one", action="store_true",
@@ -813,21 +1082,133 @@ def main() -> None:
                     "Multiple artists detected (%d) — running smart pipeline for each.",
                     len(artist_groups),
                 )
-            for i, (band_id, (artist_root, artist_urls)) in enumerate(artist_groups.items(), 1):
-                if len(artist_groups) > 1:
-                    print(f"\n── Artist {i}/{len(artist_groups)} (band_id={band_id}) ──────────────────────────")
-                did_work = run_smart_pipeline(
-                    artist_urls, output_dir, logger,
-                    skip_metadata=args.skip_metadata,
-                    one_by_one=args.one_by_one,
-                    no_upload=args.no_upload,
+            if len(artist_groups) > 1:
+                logger.info(
+                    "Multiple artists detected (%d) — running smart pipeline for each.",
+                    len(artist_groups),
                 )
-                # In one_by_one mode uploads happen inside the pipeline per-release
-                if did_work and not args.one_by_one:
-                    run_upload(output_dir, args.no_upload, logger)
+            if args.fetch_first:
+                logger.info("--fetch-first: fetching metadata for all %d artist(s) before crawling.", len(artist_groups))
+                for i, (band_id, (artist_root, artist_urls)) in enumerate(artist_groups.items(), 1):
+                    if len(artist_groups) > 1:
+                        print(f"\n── Fetching metadata {i}/{len(artist_groups)} (band_id={band_id}) ──────────────────────────")
+                    run_smart_pipeline(
+                        artist_urls, output_dir, logger,
+                        skip_metadata=args.skip_metadata,
+                        skip_update=args.skip_update,
+                        fetch_only=True,
+                    )
+                logger.info("--fetch-first: all metadata fetched, starting crawl pass.")
+                # Crawl pass: metadata already up to date, skip re-fetching
+                for i, (band_id, (artist_root, artist_urls)) in enumerate(artist_groups.items(), 1):
+                    if len(artist_groups) > 1:
+                        print(f"\n── Artist {i}/{len(artist_groups)} (band_id={band_id}) ──────────────────────────")
+                    did_work = run_smart_pipeline(
+                        artist_urls, output_dir, logger,
+                        skip_metadata=True,
+                        one_by_one=args.one_by_one,
+                        no_upload=args.no_upload,
+                    )
+                    if did_work and not args.one_by_one:
+                        run_upload(output_dir, args.no_upload, logger,
+                                   artist_folder=_find_artist_folder(band_id))
+            else:
+                for i, (band_id, (artist_root, artist_urls)) in enumerate(artist_groups.items(), 1):
+                    if len(artist_groups) > 1:
+                        print(f"\n── Artist {i}/{len(artist_groups)} (band_id={band_id}) ──────────────────────────")
+                    did_work = run_smart_pipeline(
+                        artist_urls, output_dir, logger,
+                        skip_metadata=args.skip_metadata,
+                        skip_update=args.skip_update,
+                        one_by_one=args.one_by_one,
+                        no_upload=args.no_upload,
+                    )
+                    if did_work and not args.one_by_one:
+                        run_upload(output_dir, args.no_upload, logger,
+                                   artist_folder=_find_artist_folder(band_id))
         return
 
-    parser.print_help()
+    # ── JSON mode (resume from already-fetched artist JSONs) ─────────────────
+    if args.json:
+        pending = _scan_artists_for_pending(ARTISTS_DIR)
+        if not pending:
+            print("No artists with pending work found in artists/.")
+            sys.exit(0)
+
+        selected = _prompt_json_selection(pending)
+        print(f"\nResuming {len(selected)} artist(s)...\n")
+
+        for i, p in enumerate(selected, 1):
+            if len(selected) > 1:
+                print(f"\n── Artist {i}/{len(selected)}: {p['name']} ──────────────────────────")
+
+            artist_folder = p["folder"]
+
+            # Resolve artist root URL for metadata fetch.
+            # Take the first release-level URL (not from trackinfo) that has no
+            # ?label= param, then strip it to the artist root. Label-scoped URLs
+            # belong to a different band_id and would resolve the wrong artist.
+            # If only label-scoped URLs exist the user must supply --url/--slug.
+            artist_root_url = None
+            if not args.skip_metadata:
+                import json as _json
+                from urllib.parse import urlparse as _urlparse
+                json_path = artist_folder / f"{artist_folder.name}.json"
+                if json_path.exists():
+                    try:
+                        data = _json.loads(json_path.read_text(encoding="utf-8"))
+                        for key, releases in data.items():
+                            if key.startswith("_") or not isinstance(releases, list):
+                                continue
+                            for r in releases:
+                                url = r.get("url", "")
+                                if not url:
+                                    continue
+                                if "label=" in _urlparse(url).query:
+                                    continue
+                                artist_root_url = _to_artist_root(url)
+                                break
+                            if artist_root_url:
+                                break
+                    except Exception:
+                        pass
+
+                if not artist_root_url:
+                    logger.warning(
+                        "Could not find a non-label URL in %s to use for metadata fetch. "
+                        "All release URLs appear to be label-scoped (?label=ID). "
+                        "Use --url or --slug to supply the artist URL directly, "
+                        "or pass --skip-metadata to skip the fetch and go straight to crawling.",
+                        p["name"],
+                    )
+                    # Still proceed to crawl/upload whatever is already queued
+                elif args.fetch_first:
+                    logger.info("--fetch-first: updating metadata for %s", p["name"])
+                    run_smart_pipeline(
+                        [artist_root_url], output_dir, logger,
+                        skip_metadata=args.skip_metadata,
+                        skip_update=args.skip_update,
+                        fetch_only=True,
+                    )
+                    # Refresh folder reference in case fetch moved things
+                    artist_folder = p["folder"]
+                else:
+                    # Normal (non-fetch-first) metadata update inline
+                    run_smart_pipeline(
+                        [artist_root_url], output_dir, logger,
+                        skip_metadata=args.skip_metadata,
+                        skip_update=args.skip_update,
+                        fetch_only=True,
+                    )
+                    artist_folder = p["folder"]
+
+            did_work = _run_pipeline_for_folder(
+                artist_folder, output_dir, logger,
+                one_by_one=args.one_by_one,
+                no_upload=args.no_upload,
+            )
+            if did_work and not args.one_by_one:
+                run_upload(output_dir, args.no_upload, logger, artist_folder=artist_folder)
     sys.exit(0)
 
 
