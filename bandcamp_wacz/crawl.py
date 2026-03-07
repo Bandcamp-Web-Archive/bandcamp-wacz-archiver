@@ -34,11 +34,70 @@ from .metadata import process_archived_wacz
 logger = logging.getLogger(__name__)
 
 
-def _build_crawl_config(album_url: str, cover_url_0: Optional[str]) -> str:
+def _track_cover_urls_from_json(band_id: int, item_id: int, album_art_id: Optional[int]) -> list[str]:
+    """
+    Look up the artist JSON for this release and return full-resolution seed
+    URLs for any track covers whose art_id differs from the album cover.
+
+    fetch_metadata.py visits every track page and stores art_id per track, so
+    this is the only place those IDs are available without re-fetching pages.
+    Returns an empty list if the artist JSON can't be found or has no trackinfo.
+    """
+    from .config import ARTISTS_DIR
+    import json as _json
+
+    if not ARTISTS_DIR.exists():
+        return []
+
+    # Find the artist folder by matching [band_id] suffix
+    json_path: Optional[Path] = None
+    for folder in ARTISTS_DIR.iterdir():
+        if folder.is_dir() and folder.name.endswith(f"[{band_id}]"):
+            candidate = folder / f"{folder.name}.json"
+            if candidate.exists():
+                json_path = candidate
+                break
+
+    if not json_path:
+        return []
+
+    try:
+        data = _json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Could not read artist JSON for track covers: %s", exc)
+        return []
+
+    # Find the matching album by item_id
+    album: Optional[dict] = None
+    for key, releases in data.items():
+        if key.startswith("_") or not isinstance(releases, list):
+            continue
+        for r in releases:
+            if r.get("item_id") == item_id:
+                album = r
+                break
+        if album:
+            break
+
+    if not album:
+        return []
+
+    seen: set = {album_art_id} if album_art_id else set()
+    urls: list[str] = []
+    for track in album.get("trackinfo", []):
+        art_id = track.get("art_id")
+        if art_id and art_id not in seen:
+            seen.add(art_id)
+            urls.append(f"https://f4.bcbits.com/img/a{art_id}_0")
+
+    return urls
+
+
+def _build_crawl_config(album_url: str, extra_urls: list[str]) -> str:
     """Return a Browsertrix YAML config string for the given album."""
     seeds = [{"url": album_url, "scopeType": "page"}]
-    if cover_url_0:
-        seeds.append({"url": cover_url_0, "scopeType": "page"})
+    for url in extra_urls:
+        seeds.append({"url": url, "scopeType": "page"})
 
     seed_block = "".join(
         f"  - url: \"{s['url']}\"\n    scopeType: {s['scopeType']}\n"
@@ -118,6 +177,34 @@ def crawl_album(album_url: str, output_dir: Optional[Path] = None, update_json: 
     title     = info.get("title", "untitled")
     safe_title = create_safe_filename(title)
 
+    # Collect all extra image URLs to seed (deduplicating, preserving order).
+    # Order: album cover → artist photo → banner → unique track covers.
+    _seen_urls: set[str] = {album_url}
+    extra_urls: list[str] = []
+
+    def _add_url(url: Optional[str], label: str) -> None:
+        if url and url not in _seen_urls:
+            _seen_urls.add(url)
+            extra_urls.append(url)
+            logger.debug("Extra seed (%s): %s", label, url)
+        elif not url:
+            logger.debug("No %s URL found for %s — skipping seed.", label, album_url)
+
+    _add_url(cover_url,                      "album cover")
+    _add_url(info.get("artist_image_url"),   "artist image")
+    _add_url(info.get("banner_url"),         "banner")
+
+    for tp_url in info.get("track_page_urls", []):
+        _add_url(tp_url, "track page")
+
+    # Track covers: read from the artist JSON (populated by fetch_metadata.py
+    # which visits each track page). Falls back to nothing if the JSON doesn't
+    # exist yet (e.g. --dumb mode or --quick without a prior fetch).
+    if band_id and item_id:
+        album_art_id = info.get("album_art_id")
+        for tc_url in _track_cover_urls_from_json(band_id, item_id, album_art_id):
+            _add_url(tc_url, "track cover")
+
     if item_id:
         display_name    = f"{safe_title} [{item_id}]"
         # Browsertrix only allows [a-zA-Z0-9_-] in collection names.
@@ -146,14 +233,14 @@ def crawl_album(album_url: str, output_dir: Optional[Path] = None, update_json: 
     display_name = full_filename[: -len(suffix)]
 
     logger.info(
-        "Album: %s - %s | item_id=%s | band_id=%s | cover=%s",
-        artist, title, item_id, band_id, cover_url,
+        "Album: %s - %s | item_id=%s | band_id=%s | cover=%s | +%d extra image(s)",
+        artist, title, item_id, band_id, cover_url, len(extra_urls) - (1 if cover_url else 0),
     )
 
     if not cover_url:
         logger.warning("No cover URL found for %s - crawling without cover seed.", album_url)
 
-    config_yaml = _build_crawl_config(album_url, cover_url)
+    config_yaml = _build_crawl_config(album_url, extra_urls)
     logger.debug("Crawl config:\n%s", config_yaml)
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="bc_crawl_", delete=False) as tmp:

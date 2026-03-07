@@ -140,6 +140,25 @@ def _tralbum_blob(soup: bs4.BeautifulSoup) -> dict:
             return {}
 
 
+def _track_page_urls(tralbum: dict, base_url: str) -> list[str]:
+    """
+    Return absolute track page URLs from the album's trackinfo.
+    title_link values are relative (e.g. /track/some-name) so they're
+    resolved against the album URL.
+    """
+    from urllib.parse import urljoin
+    urls: list[str] = []
+    seen: set[str] = set()
+    for track in tralbum.get("trackinfo", []):
+        link = track.get("title_link")
+        if link:
+            full = urljoin(base_url, link)
+            if full not in seen:
+                seen.add(full)
+                urls.append(full)
+    return urls
+
+
 def parse_page(url: str) -> dict:
     """
     Fetch *url* and return a minimal dict for the crawl pipeline:
@@ -203,19 +222,38 @@ def parse_page(url: str) -> dict:
     title      = current.get("title") or "Untitled"
     is_preorder = bool(tralbum.get("is_preorder"))
 
+    album_art_id = tralbum.get("art_id") or current.get("art_id")
+
     return {
-        "band_id":     band_id,
-        "artist":      artist,
-        "cover_url_0": _cover_url_0(soup),
-        "item_id":     item_id,
-        "title":       title,
-        "is_preorder": is_preorder,
+        "band_id":          band_id,
+        "artist":           artist,
+        "cover_url_0":      _cover_url_0(soup),
+        "item_id":          item_id,
+        "title":            title,
+        "is_preorder":      is_preorder,
+        "artist_image_url": _artist_image_url(soup),
+        "banner_url":       _banner_url(soup),
+        "album_art_id":     album_art_id,
+        "track_page_urls":  _track_page_urls(tralbum, url),
     }
 
 
 def _artist_from_html(soup: bs4.BeautifulSoup) -> str | None:
     el = soup.select_one("p#band-name-location span.title")
     return el.text.strip() if el and el.text else None
+
+
+def _to_full_res(url: str) -> str | None:
+    """
+    Strip the size suffix from a Bandcamp image URL and return the _0
+    (full-resolution, no extension) variant, e.g.:
+      https://f4.bcbits.com/img/0123456789_10.jpg  →  https://f4.bcbits.com/img/0123456789_0
+    """
+    if not url:
+        return None
+    url = re.sub(r'[?#].*$', '', url.strip())   # drop query-string / fragment
+    no_ext = re.sub(r'\.\w{2,4}$', '', url)     # strip extension
+    return re.sub(r'_\d+$', '_0', no_ext)       # replace size suffix with _0
 
 
 def _cover_url_0(soup: bs4.BeautifulSoup) -> str | None:
@@ -230,12 +268,55 @@ def _cover_url_0(soup: bs4.BeautifulSoup) -> str | None:
         link = art_div.find("a")
         if not link or not link.get("href"):
             return None
-        href: str = link["href"]
-        no_ext = re.sub(r"\.\w+$", "", href)
-        return re.sub(r"_\d+$", "_0", no_ext)
+        return _to_full_res(link["href"])
     except Exception as exc:
         logger.warning("Could not extract cover URL: %s", exc)
         return None
+
+
+def _artist_image_url(soup: bs4.BeautifulSoup) -> str | None:
+    """
+    Return the full-resolution artist/band photo URL, or None.
+    Bandcamp places the band photo inside #bio-container wrapped in a
+    .popupImage anchor whose href already points to a large variant.
+    """
+    try:
+        container = soup.find(id="bio-container")
+        if container:
+            a = container.find("a", class_="popupImage")
+            if a and a.get("href"):
+                return _to_full_res(a["href"])
+            img = container.find("img")
+            if img and img.get("src"):
+                return _to_full_res(img["src"])
+    except Exception as exc:
+        logger.warning("Could not extract artist image URL: %s", exc)
+    return None
+
+
+def _banner_url(soup: bs4.BeautifulSoup) -> str | None:
+    """
+    Return the full-resolution header banner URL, or None.
+    Bandcamp stores the banner as a CSS background-image on #customHeader.
+    """
+    try:
+        header = soup.find(id="customHeader")
+        if header:
+            style = header.get("style", "") or ""
+            m = re.search(
+                r'background(?:-image)?\s*:\s*url\(["\']?([^"\')\s]+)["\']?\)',
+                style,
+            )
+            if m:
+                return _to_full_res(m.group(1))
+            img = header.find("img")
+            if img and img.get("src"):
+                return _to_full_res(img["src"])
+    except Exception as exc:
+        logger.warning("Could not extract banner URL: %s", exc)
+    return None
+
+
 
 
 # ── Filename / path helpers ───────────────────────────────────────────────────

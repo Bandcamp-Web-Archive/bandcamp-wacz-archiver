@@ -1,15 +1,17 @@
 /**
- * bandcamp.js - custom Browsertrix behavior for Bandcamp album pages.
+ * bandcamp.js - custom Browsertrix behavior for Bandcamp album and track pages.
  *
- * Instead of relying on the built-in autoplay behavior (which only captures
- * partial HTTP 206 chunks), this behavior reads the track stream URLs directly
- * from the embedded JSON and force-fetches each one with fetch({ mode: 'no-cors' }).
- * This causes the browser to download the complete MP3 as a single HTTP 200
- * response, which Browsertrix captures in full and ReplayWeb.page can serve
- * correctly when replaying.
+ * On album pages: force-fetches each track's MP3 in full via fetch({ mode:
+ * 'no-cors' }) so Browsertrix captures complete HTTP 200 responses rather than
+ * partial 206 chunks from autoplay. Clicks play at the end for the snapshot.
  *
- * The play button is clicked at the end purely to capture the UI in a playing
- * state for the final page snapshot.
+ * On track pages that are part of an album (the page has a "from <album> by
+ * <artist>" header): skips the audio fetch — the MP3 was already captured
+ * from the album page. The page is still visited so its HTML, artwork,
+ * credits, and license are recorded in the WACZ.
+ *
+ * On standalone single pages (no "from … by …" header): behaves the same as
+ * an album page and fetches the audio in full.
  */
 class BandcampBehavior {
   static id = "BandcampPlay";
@@ -24,37 +26,47 @@ class BandcampBehavior {
   }
 
   async *run() {
-    yield "Extracting audio stream URLs from page metadata...";
-
     const tralbumScript = document.querySelector("script[data-tralbum]");
+    let data = null;
 
     if (tralbumScript) {
       try {
-        const data = JSON.parse(tralbumScript.getAttribute("data-tralbum"));
-
-        if (data && data.trackinfo) {
-          for (let i = 0; i < data.trackinfo.length; i++) {
-            const track = data.trackinfo[i];
-
-            if (track.file && track.file["mp3-128"]) {
-              const audioUrl = track.file["mp3-128"];
-              yield `[${i + 1}/${data.trackinfo.length}] Fetching: ${track.title}`;
-
-              try {
-                // no-cors bypasses the cross-origin block so Browsertrix
-                // can record the full response body from t4.bcbits.com.
-                await fetch(audioUrl, { mode: "no-cors" });
-                yield `✓ Captured track ${i + 1}`;
-              } catch (e) {
-                yield `✗ Failed track ${i + 1}: ${e.message}`;
-              }
-            }
-          }
-        }
+        data = JSON.parse(tralbumScript.getAttribute("data-tralbum"));
       } catch (err) {
         yield `Error parsing track metadata: ${err.message}`;
       }
-    } else {
+    }
+
+    // Skip the audio fetch on track pages that belong to an album — the MP3
+    // was already captured when the album page was crawled. Standalone singles
+    // have no "from <album> by <artist>" header, so they go through the normal
+    // fetch path below.
+    const albumTitle = document.querySelector("#name-section h3.albumTitle");
+    if (albumTitle && albumTitle.textContent.trim().startsWith("from ")) {
+      yield "Track page (part of album) — skipping audio fetch, already captured from album page.";
+      return;
+    }
+
+    if (data && data.trackinfo) {
+      yield "Extracting audio stream URLs from page metadata...";
+      for (let i = 0; i < data.trackinfo.length; i++) {
+        const track = data.trackinfo[i];
+
+        if (track.file && track.file["mp3-128"]) {
+          const audioUrl = track.file["mp3-128"];
+          yield `[${i + 1}/${data.trackinfo.length}] Fetching: ${track.title}`;
+
+          try {
+            // no-cors bypasses the cross-origin block so Browsertrix
+            // can record the full response body from t4.bcbits.com.
+            await fetch(audioUrl, { mode: "no-cors" });
+            yield `✓ Captured track ${i + 1}`;
+          } catch (e) {
+            yield `✗ Failed track ${i + 1}: ${e.message}`;
+          }
+        }
+      }
+    } else if (!data) {
       yield "No track metadata found on this page.";
     }
 

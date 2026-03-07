@@ -390,6 +390,13 @@ class Bandcamp:
                         self._get_track_metadata(track_data, art_url, base_url, artist, label)
                     )
 
+            # Roll up the most restrictive license across all tracks.
+            # Track pages are the authoritative source; the album-page license
+            # is used as a fallback when no track-level licenses are available.
+            track_licenses = [t.get("license") for t in album["trackinfo"]]
+            all_licenses = [album["license"]] + track_licenses
+            album["license"] = self._most_restrictive_license(all_licenses)
+
             return album
 
         except KeyboardInterrupt:
@@ -543,14 +550,74 @@ class Bandcamp:
     def _get_credits(self) -> Optional[str]:
         return self._text_with_linebreaks(self.soup.select_one(".tralbumData.tralbum-credits"))
 
+    # CC license slugs as they appear in creativecommons.org URLs, mapped to
+    # the display names Bandcamp uses (listed most-to-least restrictive so the
+    # index doubles as a restrictiveness rank).
+    _CC_LICENSES: list[tuple[str, str]] = [
+        ("by-nc-nd", "Attribution Non-commercial No Derivatives"),
+        ("by-nc-sa", "Attribution Non-commercial Share Alike"),
+        ("by-nc",    "Attribution Non-commercial"),
+        ("by-nd",    "Attribution No Derivatives"),
+        ("by-sa",    "Attribution Share Alike"),
+        ("by",       "Attribution"),
+    ]
+
+    # Full restrictiveness ranking (index 0 = most restrictive).
+    # "all rights reserved" beats every CC license.
+    _LICENSE_ORDER: list[str] = (
+        ["all rights reserved"]
+        + [name for _, name in _CC_LICENSES]
+    )
+
+    @classmethod
+    def _license_rank(cls, license_str: Optional[str]) -> int:
+        """Return the restrictiveness rank (lower = more restrictive).
+        Unknown / None values sort after everything else."""
+        if not license_str:
+            return len(cls._LICENSE_ORDER)
+        key = license_str.strip().lower()
+        for i, name in enumerate(cls._LICENSE_ORDER):
+            if name.lower() == key:
+                return i
+        return len(cls._LICENSE_ORDER)
+
+    @classmethod
+    def _most_restrictive_license(cls, licenses: list[Optional[str]]) -> Optional[str]:
+        """Return the most restrictive license from a list, ignoring None values."""
+        valid = [l for l in licenses if l]
+        if not valid:
+            return None
+        return min(valid, key=cls._license_rank)
+
     def _get_license(self, soup: bs4.BeautifulSoup) -> Optional[str]:
         try:
             div = soup.select_one("#license.info.license")
-            if div:
-                span = div.find("span")
-                if span:
-                    span.decompose()
-                return div.text.strip()
+            if not div:
+                return None
+
+            # Check for a Creative Commons link first — its href tells us the
+            # exact license (e.g. creativecommons.org/licenses/by-nc-nd/4.0/).
+            a = div.find("a", href=True)
+            if a:
+                href = a["href"]
+                m = re.search(r"/licenses/(by[^/]*)/", href)
+                if m:
+                    slug = m.group(1).lower()
+                    # Match longest slug first (by-nc-nd before by-nc, etc.)
+                    for cc_slug, cc_name in self._CC_LICENSES:
+                        if slug == cc_slug:
+                            return cc_name
+                    # Unrecognised CC slug — fall through to text fallback
+                    self.logger.warning("Unrecognised CC license slug '%s' in href '%s'", slug, href)
+
+            # No CC link — strip the "license" label span and return plain text
+            # (covers "all rights reserved" and any future plain-text values).
+            span = div.find("span")
+            if span:
+                span.decompose()
+            text = div.get_text(separator=" ").strip()
+            return text if text else None
+
         except Exception as e:
             self.logger.warning("Could not extract license: %s", e)
         return None
