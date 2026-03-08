@@ -4,18 +4,12 @@ metadata.py - Step 2 of the archival pipeline.
 Called automatically by crawl.py after each successful WACZ is produced.
 Does two things:
 
-  1. Writes a single-release JSON alongside the WACZ. This file is a raw
-     extract of the album dict from the artist JSON, plus the archive.org
-     identifier. It is consumed by Step 7 (upload) and deleted afterwards.
+  1. Embeds band_id and item_id into the WACZ's datapackage.json, and writes
+     a release.json entry directly inside the WACZ zip. This makes the archive
+     fully self-describing — no sidecar file on disk is needed.
 
   2. Marks the album as archived in the artist JSON
      (archived=True, archived_at=<ISO timestamp>).
-
-  3. Embeds band_id, item_id, and ia_identifier into the WACZ's
-     datapackage.json so the archive is self-describing and not reliant
-     on filename conventions.
-
-Archive.org identifier format: wacz-{band_id}-{item_id}-{YYYYMMDD}
 """
 
 from __future__ import annotations
@@ -30,6 +24,9 @@ from typing import Optional
 from .config import ARTISTS_DIR
 
 logger = logging.getLogger(__name__)
+
+# Name of the release metadata entry stored inside the WACZ zip.
+RELEASE_JSON_ENTRY = "release.json"
 
 
 def _find_artist_json(band_id: int) -> Optional[Path]:
@@ -58,32 +55,26 @@ def _find_album(data: dict, item_id: int) -> Optional[tuple[str, int, dict]]:
     return None
 
 
-def _ia_identifier(band_id: int, item_id: int) -> str:
-    date = datetime.now(timezone.utc).strftime("%Y%m%d")
-    return f"wacz-{band_id}-{item_id}-{date}"
-
-
-def embed_metadata_in_wacz(wacz_path: Path, band_id: int, item_id: int, ia_identifier: str) -> bool:
+def embed_metadata_in_wacz(wacz_path: Path, band_id: int, item_id: int, album: dict) -> bool:
     """
-    Embed band_id, item_id, and ia_identifier into the WACZ's datapackage.json.
+    Patch datapackage.json and add release.json inside the WACZ in one zip rewrite.
 
     WACZ files are ZIP archives. datapackage.json follows the Frictionless Data
-    spec which allows arbitrary extra fields, making this the correct place to
-    store provenance metadata. This makes the archive self-describing and not
-    reliant on filename conventions.
+    spec which allows arbitrary extra fields. release.json stores the full album
+    metadata so the WACZ is self-describing without any sidecar file.
 
     Returns True on success, False on failure.
     """
     DATAPACKAGE = "datapackage.json"
+    tmp_path = wacz_path.with_suffix(".wacz.tmp")
 
     try:
-        # Read all existing entries
         with zipfile.ZipFile(wacz_path, "r") as zin:
-            names = zin.namelist()
-            entries: dict[str, bytes] = {name: zin.read(name) for name in names}
+            infos   = {info.filename: info for info in zin.infolist()}
+            entries: dict[str, bytes] = {name: zin.read(name) for name in infos}
 
         if DATAPACKAGE not in entries:
-            logger.warning("No %s found in %s - skipping metadata embed.", DATAPACKAGE, wacz_path.name)
+            logger.warning("No %s found in %s — skipping metadata embed.", DATAPACKAGE, wacz_path.name)
             return False
 
         # Patch datapackage.json
@@ -93,47 +84,37 @@ def embed_metadata_in_wacz(wacz_path: Path, band_id: int, item_id: int, ia_ident
             logger.warning("Could not parse %s in %s: %s", DATAPACKAGE, wacz_path.name, exc)
             return False
 
-        pkg["bandcamp_band_id"]    = band_id
-        pkg["bandcamp_item_id"]    = item_id
-        pkg["bandcamp_ia_identifier"] = ia_identifier
-
+        pkg["bandcamp_band_id"] = band_id
+        pkg["bandcamp_item_id"] = item_id
         entries[DATAPACKAGE] = json.dumps(pkg, indent=2, ensure_ascii=False).encode("utf-8")
 
-        # Rewrite the ZIP preserving all other entries and their compression
-        tmp_path = wacz_path.with_suffix(".wacz.tmp")
-        with zipfile.ZipFile(wacz_path, "r") as zin:
-            infos = {info.filename: info for info in zin.infolist()}
-            with zipfile.ZipFile(tmp_path, "w") as zout:
-                for name, data in entries.items():
-                    orig_info = infos[name]
-                    # Use DEFLATED for datapackage.json, preserve original compression for rest
-                    compress = zipfile.ZIP_DEFLATED if name == DATAPACKAGE else orig_info.compress_type
-                    zout.writestr(zipfile.ZipInfo(
-                        filename=orig_info.filename,
-                        date_time=orig_info.date_time,
-                    ), data, compress_type=compress)
+        # Build release.json — strip pipeline-internal fields
+        release = {k: v for k, v in album.items() if k not in ("archived", "uploaded", "archived_at", "uploaded_at")}
+        release["band_id"] = band_id
+        entries[RELEASE_JSON_ENTRY] = json.dumps(release, indent=4, ensure_ascii=False).encode("utf-8")
+
+        # Rewrite the ZIP in one pass, preserving compression of existing entries
+        now = datetime.now(timezone.utc).timetuple()[:6]
+        with zipfile.ZipFile(tmp_path, "w") as zout:
+            for name, data in entries.items():
+                if name in infos:
+                    orig = infos[name]
+                    compress = zipfile.ZIP_DEFLATED if name in (DATAPACKAGE, RELEASE_JSON_ENTRY) else orig.compress_type
+                    info = zipfile.ZipInfo(filename=orig.filename, date_time=orig.date_time)
+                else:
+                    # New entry (release.json)
+                    compress = zipfile.ZIP_DEFLATED
+                    info = zipfile.ZipInfo(filename=name, date_time=now)
+                zout.writestr(info, data, compress_type=compress)
 
         tmp_path.replace(wacz_path)
-        logger.info("Embedded band_id=%s item_id=%s into %s", band_id, item_id, wacz_path.name)
+        logger.info("Embedded metadata (band_id=%s item_id=%s) into %s", band_id, item_id, wacz_path.name)
         return True
 
     except Exception as exc:
         logger.error("Could not embed metadata into %s: %s", wacz_path.name, exc)
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
+        tmp_path.unlink(missing_ok=True)
         return False
-
-
-def write_release_json(album: dict, band_id: int, item_id: int, wacz_path: Path) -> Path:
-    """Write a single-release JSON alongside the WACZ."""
-    release = {k: v for k, v in album.items() if k not in ("archived", "uploaded")}
-    release["band_id"]       = band_id
-    release["ia_identifier"] = _ia_identifier(band_id, item_id)
-
-    path = wacz_path.with_suffix(".json")
-    path.write_text(json.dumps(release, indent=4, ensure_ascii=False), encoding="utf-8")
-    logger.info("Release JSON written: %s", path)
-    return path
 
 
 def mark_archived(json_path: Path, artist_key: str, album_index: int, data: dict) -> None:
@@ -145,45 +126,32 @@ def mark_archived(json_path: Path, artist_key: str, album_index: int, data: dict
     logger.info("Marked archived: %s [index %d] at %s", json_path.name, album_index, now)
 
 
-def process_archived_wacz(wacz_path: Path, band_id: int, item_id: int) -> Optional[Path]:
-    """
-    Full Step 2 pipeline for one successfully crawled album.
-    Returns the release JSON path, or None if the artist JSON was not found.
-    """
+def process_archived_wacz(wacz_path: Path, band_id: int, item_id: int) -> None:
+    """Full Step 2 pipeline for one successfully crawled album."""
     artist_json_path = _find_artist_json(band_id)
     if not artist_json_path:
         logger.warning(
-            "No artist JSON found for band_id=%s - run fetch_metadata.py first.",
+            "No artist JSON found for band_id=%s — run fetch_metadata.py first.",
             band_id,
         )
-        return None
+        return
 
     try:
         data = json.loads(artist_json_path.read_text(encoding="utf-8"))
     except Exception as exc:
         logger.error("Could not read %s: %s", artist_json_path, exc)
-        return None
+        return
 
     result = _find_album(data, item_id)
     if not result:
         logger.warning("item_id=%s not found in %s", item_id, artist_json_path.name)
-        return None
+        return
 
     artist_key, album_index, album = result
-    identifier = _ia_identifier(band_id, item_id)
 
-    # Embed provenance metadata directly into the WACZ
-    embed_metadata_in_wacz(wacz_path, band_id, item_id, identifier)
-
-    try:
-        release_path = write_release_json(album, band_id, item_id, wacz_path)
-    except OSError as exc:
-        logger.error("Could not write release JSON: %s", exc)
-        return None
+    embed_metadata_in_wacz(wacz_path, band_id, item_id, album)
 
     try:
         mark_archived(artist_json_path, artist_key, album_index, data)
     except OSError as exc:
         logger.error("Could not update artist JSON: %s", exc)
-
-    return release_path

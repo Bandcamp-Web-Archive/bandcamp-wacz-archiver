@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
-upload.py - upload Bandcamp WACZ files and release JSONs to archive.org.
+upload.py - upload Bandcamp WACZ files to Pixeldrain.
 
-Finds WACZ/JSON pairs in the input path, uploads both files to a single IA item
-per release, marks the release as uploaded in the artist JSON, then deletes the
-local WACZ and JSON.
+Finds WACZ files in the input path, uploads each one to Pixeldrain,
+marks the release as uploaded in the artist JSON, then deletes the
+local WACZ.
+
+Release metadata is read directly from the release.json embedded inside
+each WACZ — no sidecar file is needed.
 
 Usage
 ─────
   # Upload everything in wacz_output/:
   python upload.py wacz_output/
 
-  # Upload a single WACZ (its .json must be alongside it):
+  # Upload a single WACZ:
   python upload.py "wacz_output/Album Title [item_id].wacz"
 
   # Preview without uploading or deleting:
@@ -26,58 +29,56 @@ import logging
 import re
 import sys
 import time
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from bandcamp_wacz.config import IA_ACCESS_KEY, IA_SECRET_KEY, IA_COLLECTION, ARTISTS_DIR, IA_MAX_RETRIES, IA_RETRY_DELAY
+import requests
+
+from bandcamp_wacz.config import PD_API_KEY, PD_MAX_RETRIES, PD_RETRY_DELAY, ARTISTS_DIR
 
 logger = logging.getLogger(__name__)
 
+PD_UPLOAD_URL = "https://pixeldrain.com/api/file/{name}"
 
-# ── IA helpers ────────────────────────────────────────────────────────────────
 
-def _ia_session():
-    """Return an authenticated internetarchive session."""
+# ── WACZ helpers ──────────────────────────────────────────────────────────────
+
+def _read_wacz_release_json(wacz_path: Path) -> dict:
+    """
+    Read the release.json embedded inside the WACZ zip.
+    Returns the parsed dict, or an empty dict on any failure.
+    """
     try:
-        import internetarchive as ia
-    except ImportError:
-        logger.error("internetarchive not installed. Run: pip install internetarchive")
-        sys.exit(1)
-
-    if not IA_ACCESS_KEY or not IA_SECRET_KEY:
-        logger.error(
-            "IA_ACCESS_KEY and IA_SECRET_KEY must be set in .env to upload."
-        )
-        sys.exit(1)
-
-    return ia.get_session(config={
-        "s3": {"access": IA_ACCESS_KEY, "secret": IA_SECRET_KEY}
-    })
+        with zipfile.ZipFile(wacz_path, "r") as zf:
+            if "release.json" in zf.namelist():
+                return json.loads(zf.read("release.json").decode("utf-8"))
+    except Exception as exc:
+        logger.debug("Could not read release.json from %s: %s", wacz_path.name, exc)
+    return {}
 
 
-def _build_ia_metadata(release: dict) -> dict:
-    """Map release JSON fields to IA item metadata."""
-    item_id     = release.get("item_id", "")
-    album_title = release.get("title", "")
-    date        = ""
-    date_str    = release.get("datePublished") or ""
-    m = re.search(r'\b(\d{4})\b', date_str)
+def _read_wacz_datapackage(wacz_path: Path) -> dict:
+    """
+    Read datapackage.json from the WACZ zip.
+    Returns the parsed dict, or an empty dict on any failure.
+    """
+    try:
+        with zipfile.ZipFile(wacz_path, "r") as zf:
+            if "datapackage.json" in zf.namelist():
+                return json.loads(zf.read("datapackage.json").decode("utf-8"))
+    except Exception as exc:
+        logger.debug("Could not read datapackage.json from %s: %s", wacz_path.name, exc)
+    return {}
+
+
+def _band_item_id_from_filename(wacz_path: Path) -> tuple[Optional[int], Optional[int]]:
+    """Parse item_id from filename as a last-resort fallback."""
+    m = re.search(r'\[(\d+)\]\.wacz$', wacz_path.name)
     if m:
-        date = m.group(1)
-
-    return {
-        "title":        release.get("ia_identifier", "Untitled"),
-        "creator":      release.get("artist", ""),
-        "artist":       release.get("artist", ""),
-        "album_title":  album_title,
-        "mediatype":    "data",
-        "collection":   IA_COLLECTION,
-        "date":         date,
-        "original_url": release.get("url", ""),
-        "band_id":      str(release.get("band_id", "")),
-        "item_id":      str(item_id),
-    }
+        return None, int(m.group(1))
+    return None, None
 
 
 # ── Artist JSON update ────────────────────────────────────────────────────────
@@ -93,35 +94,11 @@ def _find_artist_json(band_id: int) -> Optional[Path]:
     return None
 
 
-def _find_release_in_artist_json(band_id: int, item_id: int) -> Optional[dict]:
-    """Look up and return a release dict from the artist JSON by item_id."""
+def _mark_uploaded(band_id: int, item_id: int, pd_wacz_id: str) -> None:
+    """Set uploaded=True, uploaded_at, and pd_wacz_id on the album in the artist JSON."""
     json_path = _find_artist_json(band_id)
     if not json_path:
-        logger.warning("Could not find artist JSON for band_id=%s.", band_id)
-        return None
-
-    try:
-        data = json.loads(json_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        logger.error("Could not read artist JSON: %s", exc)
-        return None
-
-    for key, releases in data.items():
-        if key.startswith("_") or not isinstance(releases, list):
-            continue
-        for release in releases:
-            if release.get("item_id") == item_id:
-                return release
-
-    logger.warning("item_id=%s not found in artist JSON for band_id=%s.", item_id, band_id)
-    return None
-
-
-def _mark_uploaded(band_id: int, item_id: int, identifier: str) -> None:
-    """Set uploaded=True, uploaded_at, and ia_identifier on the album in the artist JSON."""
-    json_path = _find_artist_json(band_id)
-    if not json_path:
-        logger.warning("Could not find artist JSON for band_id=%s - skipping uploaded mark.", band_id)
+        logger.warning("Could not find artist JSON for band_id=%s — skipping uploaded mark.", band_id)
         return
 
     try:
@@ -130,115 +107,45 @@ def _mark_uploaded(band_id: int, item_id: int, identifier: str) -> None:
         logger.error("Could not read artist JSON: %s", exc)
         return
 
-    now = datetime.now(timezone.utc).isoformat()
+    now   = datetime.now(timezone.utc).isoformat()
     found = False
     for key, releases in data.items():
         if key.startswith("_") or not isinstance(releases, list):
             continue
         for release in releases:
             if release.get("item_id") == item_id:
-                release["uploaded"]      = True
-                release["uploaded_at"]   = now
-                release["ia_identifier"] = identifier
+                release["uploaded"]    = True
+                release["uploaded_at"] = now
+                release["pd_wacz_id"]  = pd_wacz_id
                 found = True
                 break
         if found:
             break
 
     if not found:
-        logger.warning("item_id=%s not found in artist JSON - skipping uploaded mark.", item_id)
+        logger.warning("item_id=%s not found in artist JSON — skipping uploaded mark.", item_id)
         return
 
     try:
         json_path.write_text(json.dumps(data, indent=4, ensure_ascii=False), encoding="utf-8")
-        logger.info("Marked uploaded: item_id=%s at %s", item_id, now)
+        logger.info("Marked uploaded: item_id=%s pd_wacz_id=%s", item_id, pd_wacz_id)
     except OSError as exc:
         logger.error("Could not write artist JSON: %s", exc)
 
 
-# ── Per-release upload ────────────────────────────────────────────────────────
-
-def _band_item_id_from_filename(wacz_path: Path) -> tuple[int | None, int | None]:
-    """
-    Parse band_id and item_id from a WACZ filename as a last-resort fallback.
-    Expects patterns like 'Title [item_id].wacz' — only item_id is recoverable
-    from the filename; band_id is not encoded there.
-    """
-    import re
-    m = re.search(r'\[(\d+)\]\.wacz$', wacz_path.name)
-    if m:
-        return None, int(m.group(1))
-    return None, None
-
-
-def _read_wacz_datapackage(wacz_path: Path) -> dict:
-    """
-    Read the embedded datapackage.json from a WACZ file.
-    Returns the parsed dict, or an empty dict on any failure.
-    """
-    try:
-        import zipfile
-        with zipfile.ZipFile(wacz_path, "r") as zf:
-            if "datapackage.json" in zf.namelist():
-                return json.loads(zf.read("datapackage.json").decode("utf-8"))
-    except Exception as exc:
-        logger.debug("Could not read datapackage.json from %s: %s", wacz_path.name, exc)
-    return {}
-
+# ── Per-WACZ upload ───────────────────────────────────────────────────────────
 
 def upload_release(wacz_path: Path, dry_run: bool) -> bool:
     """
-    Upload one WACZ + JSON pair to archive.org.
+    Upload one WACZ to Pixeldrain.
     Returns True on success, False on failure.
     """
-    json_path = wacz_path.with_suffix(".json")
-
-    if not json_path.exists():
-        logger.warning(
-            "No sidecar JSON for %s — attempting to reconstruct from artist JSON.",
-            wacz_path.name,
-        )
-        datapackage = _read_wacz_datapackage(wacz_path)
-        band_id = datapackage.get("bandcamp_band_id")
-        item_id = datapackage.get("bandcamp_item_id")
-        identifier = datapackage.get("bandcamp_ia_identifier")
-
-        if not band_id or not item_id or not identifier:
-            logger.error(
-                "No sidecar and no usable datapackage for %s — skipping.",
-                wacz_path.name,
-            )
-            return False
-
-        album = _find_release_in_artist_json(int(band_id), int(item_id))
-        if not album:
-            logger.error(
-                "Could not find item_id=%s in artist JSON — skipping %s.",
-                item_id, wacz_path.name,
-            )
-            return False
-
-        # Reconstruct the sidecar using the same logic as metadata.py:
-        # strip archived/uploaded tracking fields, add band_id and ia_identifier.
-        reconstructed = {k: v for k, v in album.items() if k not in ("archived", "uploaded", "archived_at", "uploaded_at")}
-        reconstructed["band_id"]       = int(band_id)
-        reconstructed["ia_identifier"] = identifier
-
-        try:
-            json_path.write_text(json.dumps(reconstructed, indent=4, ensure_ascii=False), encoding="utf-8")
-            logger.info("Reconstructed sidecar JSON written: %s", json_path.name)
-        except OSError as exc:
-            logger.error("Could not write reconstructed sidecar JSON: %s", exc)
-            return False
-
-    try:
-        release = json.loads(json_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        logger.error("Could not read release JSON %s: %s", json_path.name, exc)
+    if not PD_API_KEY:
+        logger.error("PD_API_KEY is not set in .env — cannot upload.")
         return False
 
-    # Read band_id and item_id: prefer embedded WACZ datapackage, fall back to sidecar JSON,
-    # then fall back to filename parsing.
+    # Read metadata from inside the WACZ
+    release     = _read_wacz_release_json(wacz_path)
     datapackage = _read_wacz_datapackage(wacz_path)
 
     band_id = (
@@ -251,102 +158,74 @@ def upload_release(wacz_path: Path, dry_run: bool) -> bool:
         or release.get("item_id")
         or _band_item_id_from_filename(wacz_path)[1]
     )
-    identifier = (
-        datapackage.get("bandcamp_ia_identifier")
-        or release.get("ia_identifier")
-    )
 
-    if not identifier:
-        logger.error("No ia_identifier in %s or its datapackage.json - skipping.", wacz_path.name)
+    if not item_id:
+        logger.error("Could not determine item_id for %s — skipping.", wacz_path.name)
         return False
-    metadata = _build_ia_metadata(release)
 
-    upload_files = [str(wacz_path), str(json_path)]
+    logger.info("Uploading: %s", wacz_path.name)
 
-    logger.info("Uploading: %s → %s", wacz_path.name, identifier)
     if dry_run:
-        print(f"  [DRY RUN] Would upload {wacz_path.name} + {json_path.name}")
-        print(f"            identifier : {identifier}")
-        for k, v in metadata.items():
-            print(f"            {k:<16}: {v}")
+        print(f"  [DRY RUN] Would upload {wacz_path.name}")
+        print(f"            artist : {release.get('artist', '?')}")
+        print(f"            title  : {release.get('title', '?')}")
+        print(f"            size   : {wacz_path.stat().st_size:,} bytes")
         return True
 
-    item_created = False
-    last_exc: Exception | None = None
-    try:
-        for attempt in range(1, IA_MAX_RETRIES + 2):  # +2: first try + retries
-            try:
-                session  = _ia_session()
-                item     = session.get_item(identifier)
-                response = item.upload(
-                    files=upload_files,
-                    metadata=metadata,
-                    checksum=True,
-                    verbose=True,
+    # Upload to Pixeldrain via PUT /api/file/{filename}
+    pd_wacz_id: Optional[str] = None
+
+    for attempt in range(1, PD_MAX_RETRIES + 2):
+        try:
+            with wacz_path.open("rb") as fh:
+                resp = requests.put(
+                    PD_UPLOAD_URL.format(name=wacz_path.name),
+                    data=fh,
+                    auth=("", PD_API_KEY),
+                    timeout=None,  # large files — no timeout
                 )
-                item_created = True  # noqa: F841 (kept for clarity)
 
-                # internetarchive returns a list of responses; check all succeeded
-                failures = [r for r in response if r.status_code not in (200, 201)]
-                if failures:
-                    for r in failures:
-                        logger.error("Upload failed for %s: HTTP %s", r.url, r.status_code)
-                    last_exc = RuntimeError(f"HTTP error(s) from IA: {[r.status_code for r in failures]}")
-                    raise last_exc
-
-                # Success — break out of retry loop
+            if resp.status_code == 201:
+                pd_wacz_id = resp.json()["id"]
+                logger.info("Upload succeeded: %s → pixeldrain.com/u/%s", wacz_path.name, pd_wacz_id)
                 break
+            else:
+                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
 
-            except KeyboardInterrupt:
-                raise
+        except KeyboardInterrupt:
+            print()
+            logger.warning("Upload interrupted for %s.", wacz_path.name)
+            raise
 
-            except Exception as exc:
-                last_exc = exc
-                if attempt <= IA_MAX_RETRIES:
-                    wait = IA_RETRY_DELAY * attempt
-                    logger.warning(
-                        "Upload attempt %d/%d failed for %s: %s  — retrying in %ds...",
-                        attempt, IA_MAX_RETRIES + 1, identifier, exc, wait,
-                    )
-                    time.sleep(wait)
-                else:
-                    logger.error(
-                        "Upload failed after %d attempt(s) for %s: %s",
-                        attempt, identifier, exc,
-                    )
-                    return False
-
-    except KeyboardInterrupt:
-        print()
-        logger.warning("Upload interrupted for %s.", identifier)
-        if item_created:
-            logger.warning("Partial upload detected - deleting IA item %s...", identifier)
-            try:
-                import internetarchive as _ia
-                _ia.delete(identifier, access_key=IA_ACCESS_KEY, secret_key=IA_SECRET_KEY,
-                           cascade_delete=True, verbose=True)
-                logger.info("Deleted partial IA item: %s", identifier)
-            except Exception as del_exc:
-                logger.error(
-                    "Could not delete partial IA item %s: %s  "
-                    "Please delete it manually at https://archive.org/delete/%s",
-                    identifier, del_exc, identifier,
+        except Exception as exc:
+            if attempt <= PD_MAX_RETRIES:
+                wait = PD_RETRY_DELAY * attempt
+                logger.warning(
+                    "Upload attempt %d/%d failed for %s: %s — retrying in %ds...",
+                    attempt, PD_MAX_RETRIES + 1, wacz_path.name, exc, wait,
                 )
-        raise KeyboardInterrupt() from None
+                time.sleep(wait)
+            else:
+                logger.error(
+                    "Upload failed after %d attempt(s) for %s: %s",
+                    attempt, wacz_path.name, exc,
+                )
+                return False
 
-    logger.info("Upload succeeded: %s", identifier)
+    if not pd_wacz_id:
+        logger.error("Upload did not return a file ID for %s.", wacz_path.name)
+        return False
 
     # Mark uploaded in artist JSON
     if band_id and item_id:
-        _mark_uploaded(int(band_id), int(item_id), identifier)
+        _mark_uploaded(int(band_id), int(item_id), pd_wacz_id)
 
-    # Delete local WACZ and release JSON
+    # Delete local WACZ
     try:
         wacz_path.unlink()
-        json_path.unlink()
-        logger.info("Deleted local files: %s, %s", wacz_path.name, json_path.name)
+        logger.info("Deleted local file: %s", wacz_path.name)
     except OSError as exc:
-        logger.warning("Could not delete local files: %s", exc)
+        logger.warning("Could not delete local WACZ: %s", exc)
 
     return True
 
@@ -375,7 +254,7 @@ def collect_wacz_files(inputs: list[str]) -> list[Path]:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="upload.py",
-        description="Upload Bandcamp WACZ files to archive.org.",
+        description="Upload Bandcamp WACZ files to Pixeldrain.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -404,14 +283,18 @@ def main() -> None:
         print("No WACZ files to upload.")
         sys.exit(0)
 
-    ok = 0
+    ok   = 0
     fail = 0
     for wacz_path in wacz_files:
         logger.info("Processing: %s", wacz_path.name)
-        if upload_release(wacz_path, dry_run=args.dry_run):
-            ok += 1
-        else:
-            fail += 1
+        try:
+            if upload_release(wacz_path, dry_run=args.dry_run):
+                ok += 1
+            else:
+                fail += 1
+        except KeyboardInterrupt:
+            print("\nInterrupted.")
+            sys.exit(130)
 
     print(f"\n── Summary ─────────────────────────────")
     print(f"  Succeeded : {ok}")
@@ -421,8 +304,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nInterrupted.")
-        sys.exit(130)
+    main()

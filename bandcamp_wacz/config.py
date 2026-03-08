@@ -61,7 +61,7 @@ CRAWL_RETRY_DELAY: int = int(os.getenv("CRAWL_RETRY_DELAY", "30"))
 
 # ── Filename limits ───────────────────────────────────────────────────────────
 
-# Maximum filename length in bytes (archive.org limit is 230 bytes).
+# Maximum filename length in bytes (pixeldrain enforces a 255-character limit).
 # Applies to the full filename including suffix, e.g. "Title [item_id].wacz".
 FILENAME_MAX_BYTES: int = int(os.getenv("FILENAME_MAX_BYTES", "210"))
 
@@ -72,19 +72,15 @@ FILENAME_MAX_BYTES: int = int(os.getenv("FILENAME_MAX_BYTES", "210"))
 #   hash   — replace the entire title with a short SHA-1 hash (unambiguous, not readable)
 FILENAME_TRUNCATION: str = os.getenv("FILENAME_TRUNCATION", "middle").lower()
 
-# ── archive.org ───────────────────────────────────────────────────────────────
+# ── Pixeldrain ────────────────────────────────────────────────────────────────
 
-IA_ACCESS_KEY: str | None = os.getenv("IA_ACCESS_KEY")
-IA_SECRET_KEY: str | None = os.getenv("IA_SECRET_KEY")
-
-# archive.org collection to upload to.
-IA_COLLECTION: str = os.getenv("IA_COLLECTION", "opensource_media")
+PD_API_KEY: str | None = os.getenv("PD_API_KEY")
 
 # Number of times to retry a failed upload before giving up.
-IA_MAX_RETRIES: int = int(os.getenv("IA_MAX_RETRIES", "5"))
+PD_MAX_RETRIES: int = int(os.getenv("PD_MAX_RETRIES", "5"))
 
 # Seconds to wait before retrying a failed upload (linear back-off: delay * attempt).
-IA_RETRY_DELAY: int = int(os.getenv("IA_RETRY_DELAY", "10"))
+PD_RETRY_DELAY: int = int(os.getenv("PD_RETRY_DELAY", "10"))
 
 # ── Email watcher ─────────────────────────────────────────────────────────────
 

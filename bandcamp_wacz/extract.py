@@ -138,8 +138,19 @@ def _extract_record_body(wacz: zipfile.ZipFile, cdx: dict) -> Optional[bytes]:
 
 # ── Metadata loading ──────────────────────────────────────────────────────────
 
+def _find_release_json_in_wacz(wacz_path: Path) -> Optional[dict]:
+    """Extract release.json from inside the WACZ zip, if present."""
+    try:
+        with zipfile.ZipFile(wacz_path, "r") as zf:
+            if "release.json" in zf.namelist():
+                return json.loads(zf.read("release.json").decode("utf-8"))
+    except Exception as exc:
+        logger.debug("Could not read release.json from %s: %s", wacz_path.name, exc)
+    return None
+
+
 def _find_release_json(wacz_path: Path) -> Optional[Path]:
-    """Look for <wacz_stem>.json in the same folder as the WACZ."""
+    """Look for <wacz_stem>.json alongside the WACZ (legacy sidecar fallback)."""
     candidate = wacz_path.with_suffix(".json")
     return candidate if candidate.exists() else None
 
@@ -242,16 +253,22 @@ def _load_metadata(
     Load album metadata dict from release JSON or artist JSON.
     Falls back to --ask prompt if both are missing and ask=True.
     """
-    # 1. Release JSON alongside WACZ
+    # 1. release.json embedded inside the WACZ (preferred)
+    embedded = _find_release_json_in_wacz(wacz_path)
+    if embedded:
+        logger.info("Using release.json embedded in WACZ: %s", wacz_path.name)
+        return embedded
+
+    # 2. Legacy sidecar JSON alongside the WACZ
     release_json_path = _find_release_json(wacz_path)
     if release_json_path:
-        logger.info("Using release JSON: %s", release_json_path)
+        logger.info("Using sidecar release JSON: %s", release_json_path)
         try:
             return json.loads(release_json_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            logger.warning("Could not read release JSON: %s", exc)
+            logger.warning("Could not read sidecar release JSON: %s", exc)
 
-    logger.warning("No release JSON found alongside %s - searching artist JSONs...", wacz_path.name)
+    logger.warning("No release JSON found for %s - searching artist JSONs...", wacz_path.name)
 
     # 2. Search all artist JSONs for the item_id parsed from the WACZ filename
     item_id = _guess_item_id_from_wacz(wacz_path)

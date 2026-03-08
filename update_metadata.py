@@ -9,7 +9,7 @@ the fields in place and records the old values in a _history list.
 Watched fields: title, artist, coverUrl_0, trackinfo
   (trackinfo compared on: title, duration, track_id, url, trackCoverUrl_0, track count)
 
-Pipeline state fields (archived, uploaded, archived_at, uploaded_at, ia_identifier) are never overwritten.
+Pipeline state fields (archived, uploaded, archived_at, uploaded_at, pd_wacz_id) are never overwritten.
 
 Also used by the email watcher (Step 6): when a Bandcamp new-release email is
 received, the album URL is passed here, which strips it to the artist root and
@@ -58,7 +58,7 @@ WATCHED_FIELDS = {"title", "artist", "coverUrl_0", "is_preorder"}
 WATCHED_TRACK_FIELDS = {"title", "duration", "track_id", "url", "trackCoverUrl_0"}
 
 # Pipeline state fields - never overwritten by metadata updates
-STATE_FIELDS = {"archived", "uploaded", "archived_at", "uploaded_at", "ia_identifier"}
+STATE_FIELDS = {"archived", "uploaded", "archived_at", "uploaded_at", "pd_wacz_id"}
 
 
 # ── URL helpers ───────────────────────────────────────────────────────────────
@@ -141,7 +141,7 @@ def apply_changes(existing: dict, fresh: dict, changed_fields: dict) -> dict:
     """
     Update existing album dict with new values for changed fields.
     Preserves STATE_FIELDS. Appends old values to _history.
-    Resets archived, uploaded, archived_at, uploaded_at, and ia_identifier so
+    Resets archived, uploaded, archived_at, uploaded_at, and pd_wacz_id so
     the album is re-queued for archival and re-upload. Moves the previous state
     to history so the old IA item and timestamps are traceable.
     """
@@ -151,7 +151,7 @@ def apply_changes(existing: dict, fresh: dict, changed_fields: dict) -> dict:
         "changed_at": now,
         "archived_at_change": bool(existing.get("archived")),
         "uploaded_at_change": bool(existing.get("uploaded")),
-        "ia_identifier_at_change": existing.get("ia_identifier"),
+        "pd_wacz_id_at_change": existing.get("pd_wacz_id"),
         "fields": changed_fields,
     }
     existing.setdefault("_history", []).append(history_entry)
@@ -166,7 +166,7 @@ def apply_changes(existing: dict, fresh: dict, changed_fields: dict) -> dict:
     existing["uploaded"]      = False
     existing["archived_at"]   = None
     existing["uploaded_at"]   = None
-    existing["ia_identifier"]  = None
+    existing["pd_wacz_id"]  = None
 
     return existing
 
