@@ -37,10 +37,115 @@ from typing import Optional
 import requests
 
 from bandcamp_wacz.config import PD_API_KEY, PD_MAX_RETRIES, PD_RETRY_DELAY, ARTISTS_DIR
+from bandcamp_wacz.bandcamp import artist_folder_name
 
 logger = logging.getLogger(__name__)
 
-PD_UPLOAD_URL = "https://pixeldrain.com/api/file/{name}"
+# Base URL for the pixeldrain filesystem API.
+# All paths are relative to the authenticated user's personal root ("me").
+PD_FS_BASE_URL = "https://pixeldrain.com/api/filesystem/me"
+
+# Folders already confirmed to exist this session.
+# Avoids a redundant POST for every WACZ belonging to the same artist.
+_pd_folders_created: set[str] = set()
+
+
+def _ensure_pd_folder(folder: str) -> bool:
+    """
+    Create a directory inside the user's personal Pixeldrain filesystem if it
+    does not already exist.
+
+    The filesystem API expects a multipart/form-data POST with action=mkdirall,
+    which is idempotent — it succeeds whether or not the folder already exists.
+
+    Returns True if the folder is ready to use, False on any error.
+    """
+    if folder in _pd_folders_created:
+        return True
+
+    url = f"{PD_FS_BASE_URL}/{folder}"
+
+    try:
+        resp = requests.post(
+            url,
+            data={"action": "mkdirall"},
+            auth=("", PD_API_KEY),
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            logger.info("Pixeldrain folder ready: %s", folder)
+        else:
+            logger.error(
+                "Failed to create Pixeldrain folder %s: HTTP %d %s",
+                folder, resp.status_code, resp.text[:200],
+            )
+            return False
+    except Exception as exc:
+        logger.error("Error creating Pixeldrain folder %s: %s", folder, exc)
+        return False
+
+    _pd_folders_created.add(folder)
+    return True
+
+
+def _pd_share_file(file_url: str) -> Optional[str]:
+    """
+    Make a filesystem file publicly accessible and return its share ID.
+
+    Pixeldrain's filesystem files are private by default. Sharing is done
+    by POSTing action=update with shared=true to the file's path. The API
+    responds with a FilesystemNode whose 'id' field is populated once the
+    file is shared.
+
+    If the update response doesn't include an 'id', a follow-up GET is made
+    to retrieve the node details and extract the public ID from there.
+
+    Returns the public file ID (usable as pixeldrain.com/u/{id}),
+    or None on failure.
+    """
+    try:
+        resp = requests.post(
+            file_url,
+            data={"action": "update", "shared": "true"},
+            auth=("", PD_API_KEY),
+            timeout=30,
+        )
+        if resp.status_code not in (200, 201):
+            logger.error(
+                "Failed to share file %s: HTTP %d %s",
+                file_url, resp.status_code, resp.text[:200],
+            )
+            return None
+
+        # Try to get the ID directly from the update response
+        node = resp.json()
+        file_id = node.get("id")
+        if file_id:
+            return file_id
+
+        # The update response didn't include 'id' — do a GET to retrieve the
+        # full node details, which should include the public file ID.
+        logger.debug("Share response had no 'id'; fetching node details via GET: %s", file_url)
+        get_resp = requests.get(
+            file_url,
+            auth=("", PD_API_KEY),
+            timeout=30,
+        )
+        if get_resp.status_code == 200:
+            node = get_resp.json()
+            file_id = node.get("id")
+            if file_id:
+                return file_id
+            logger.error("GET node response also contained no 'id': %s", get_resp.text[:200])
+        else:
+            logger.error(
+                "GET node failed for %s: HTTP %d %s",
+                file_url, get_resp.status_code, get_resp.text[:200],
+            )
+
+    except Exception as exc:
+        logger.error("Error sharing file %s: %s", file_url, exc)
+    return None
 
 
 # ── WACZ helpers ──────────────────────────────────────────────────────────────
@@ -163,31 +268,57 @@ def upload_release(wacz_path: Path, dry_run: bool) -> bool:
         logger.error("Could not determine item_id for %s — skipping.", wacz_path.name)
         return False
 
-    logger.info("Uploading: %s", wacz_path.name)
+    if not band_id:
+        logger.error("Could not determine band_id for %s — skipping.", wacz_path.name)
+        return False
+
+    band_id = int(band_id)
+    artist_name = release.get("artist") or datapackage.get("bandcamp_artist") or "unknown"
+    folder = artist_folder_name(artist_name, band_id)
+    logger.info("Uploading: %s (folder=%s)", wacz_path.name, folder)
 
     if dry_run:
         print(f"  [DRY RUN] Would upload {wacz_path.name}")
-        print(f"            artist : {release.get('artist', '?')}")
+        print(f"            folder : {folder}/")
+        print(f"            artist : {artist_name}")
         print(f"            title  : {release.get('title', '?')}")
         print(f"            size   : {wacz_path.stat().st_size:,} bytes")
         return True
 
-    # Upload to Pixeldrain via PUT /api/file/{filename}
+    # Ensure the per-artist folder exists on Pixeldrain
+    if not _ensure_pd_folder(folder):
+        return False
+
+    # Upload to Pixeldrain via PUT /api/filesystem/me/{folder}/{filename}
+    upload_url = f"{PD_FS_BASE_URL}/{folder}/{wacz_path.name}"
     pd_wacz_id: Optional[str] = None
 
     for attempt in range(1, PD_MAX_RETRIES + 2):
         try:
             with wacz_path.open("rb") as fh:
                 resp = requests.put(
-                    PD_UPLOAD_URL.format(name=wacz_path.name),
+                    upload_url,
                     data=fh,
                     auth=("", PD_API_KEY),
                     timeout=None,  # large files — no timeout
                 )
 
-            if resp.status_code == 201:
-                pd_wacz_id = resp.json()["id"]
-                logger.info("Upload succeeded: %s → pixeldrain.com/u/%s", wacz_path.name, pd_wacz_id)
+            if resp.status_code in (200, 201):
+                # Upload succeeded. The file is private by default — share it
+                # to get a public ID usable at pixeldrain.com/u/{id}.
+                file_id = _pd_share_file(upload_url)
+                if file_id:
+                    pd_wacz_id = file_id
+                    logger.info(
+                        "Upload + share succeeded: %s/%s → pixeldrain.com/u/%s",
+                        folder, wacz_path.name, pd_wacz_id,
+                    )
+                else:
+                    logger.warning(
+                        "Upload succeeded but sharing failed for %s — storing path as reference.",
+                        wacz_path.name,
+                    )
+                    pd_wacz_id = f"me/{folder}/{wacz_path.name}"
                 break
             else:
                 raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
@@ -217,8 +348,8 @@ def upload_release(wacz_path: Path, dry_run: bool) -> bool:
         return False
 
     # Mark uploaded in artist JSON
-    if band_id and item_id:
-        _mark_uploaded(int(band_id), int(item_id), pd_wacz_id)
+    if item_id:
+        _mark_uploaded(band_id, int(item_id), pd_wacz_id)
 
     # Delete local WACZ
     try:
