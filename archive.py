@@ -33,6 +33,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import uuid
 from pathlib import Path
 
@@ -40,6 +41,32 @@ from bandcamp_wacz.crawl import crawl_album, crawl_list
 from bandcamp_wacz.config import WACZ_OUTPUT_DIR, ARTISTS_DIR
 
 DEFAULT_LIST_FILE = "bandcamp-dump.lst"
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+class _ColorFormatter(logging.Formatter):
+    """Logging formatter that tints upload-thread log lines cyan.
+
+    Any log line emitted from a thread whose name starts with ``upload-``
+    (e.g. ``upload-12345``) is rendered in cyan so it stands out from the main
+    crawl output when both are interleaved on the terminal.  Checking the
+    thread name rather than the logger name means we catch every logger that
+    runs inside the upload thread — including the logger inside upload.py itself
+    which has its own module-level name.
+
+    Color codes are only emitted when stderr is a real TTY; they are suppressed
+    automatically when output is redirected to a file or pipe.
+    """
+    _CYAN  = "\033[36m"
+    _RESET = "\033[0m"
+    _is_tty = hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
+
+    def format(self, record: logging.LogRecord) -> str:
+        msg = super().format(record)
+        if self._is_tty and threading.current_thread().name.startswith("upload-"):
+            return f"{self._CYAN}{msg}{self._RESET}"
+        return msg
 
 
 # ── List file I/O ─────────────────────────────────────────────────────────────
@@ -454,7 +481,7 @@ def run_smart_pipeline(
     # Step 5: archive all releases that need it
     to_archive = _urls_to_archive(artist_folder)
     if not to_archive:
-        if not no_upload and _has_unuploaded(artist_folder):
+        if _has_unuploaded(artist_folder):
             print("Nothing to crawl - all releases already archived. Proceeding to upload...")
             return True
         print("Nothing to archive - all releases are already up to date.")
@@ -723,6 +750,54 @@ def run_upload(output_dir, no_upload: bool, logger, artist_folder: Path | None =
 
 
 
+# ── Pipeline upload helper ────────────────────────────────────────────────────
+
+def _upload_thread_target(
+    output_dir: Path,
+    no_upload: bool,
+    logger: logging.Logger,
+    artist_folder: Path | None,
+    error_sink: list,
+) -> None:
+    """Target for background upload threads spawned by --pipeline.
+
+    Runs *run_upload* in a daemon thread so the main thread can immediately
+    start crawling the next artist.  After a successful upload, cleans up the
+    per-artist output subdirectory (the band_<id>/ dir created by the pipeline)
+    so the parent job directory is left empty and atexit can remove it cleanly.
+
+    Exceptions are appended to *error_sink* rather than propagated (daemon
+    threads have no caller to propagate to); the main thread checks *error_sink*
+    after joining all threads.
+    """
+    try:
+        run_upload(output_dir, no_upload, logger, artist_folder=artist_folder)
+        # After upload.py finishes, WACZ and sidecar files should have been
+        # removed.  Clean up the now-empty per-artist subdir so the parent job
+        # directory is empty and atexit can delete it without warnings.
+        remaining = (
+            list(output_dir.rglob("*.wacz")) +
+            list(output_dir.rglob("*.json"))
+        )
+        if not remaining:
+            try:
+                shutil.rmtree(output_dir)
+                logger.debug("Removed per-artist output directory: %s", output_dir)
+            except OSError as exc:
+                logger.warning("Could not remove output directory %s: %s", output_dir, exc)
+        else:
+            logger.warning(
+                "Per-artist output directory %s still has %d file(s) after upload — not removing:\n  %s",
+                output_dir, len(remaining),
+                "\n  ".join(str(p) for p in remaining),
+            )
+    except KeyboardInterrupt:
+        pass  # daemon thread — main thread owns KeyboardInterrupt handling
+    except Exception as exc:
+        logger.error("Background upload failed: %s", exc)
+        error_sink.append(exc)
+
+
 # ── JSON mode helpers ─────────────────────────────────────────────────────────
 
 def _scan_artists_for_pending(artists_dir: Path) -> list[dict]:
@@ -871,7 +946,7 @@ def _run_pipeline_for_folder(
 
     to_archive = _urls_to_archive(artist_folder)
     if not to_archive:
-        if not no_upload and _has_unuploaded(artist_folder):
+        if _has_unuploaded(artist_folder):
             print("Nothing to crawl - all releases already archived. Proceeding to upload...")
             return True
         print("Nothing to archive - all releases are already up to date.")
@@ -954,6 +1029,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip fetch/update metadata step and archive only what is already queued (archived=False).")
     parser.add_argument("--one-by-one", action="store_true",
         help="Archive and upload one release at a time. Saves disc space for large discographies.")
+    parser.add_argument("--pipeline", action="store_true",
+        help="When archiving multiple artists, start crawling the next artist as soon as the "
+             "current one finishes crawling, while its upload runs in the background. "
+             "Reduces total wall-clock time because uploading and crawling are independent. "
+             "Cannot be combined with --one-by-one.")
     parser.add_argument("--no-upload", action="store_true",
         help="Skip uploading to archive.org after archiving.")
     parser.add_argument("--filename-truncation", metavar="STYLE",
@@ -971,12 +1051,19 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    handler = logging.StreamHandler()
+    handler.setFormatter(_ColorFormatter(
+        fmt="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
-        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[handler],
     )
     logger = logging.getLogger("archive")
+
+    if getattr(args, "pipeline", False) and args.one_by_one:
+        parser.error("--pipeline and --one-by-one are mutually exclusive.")
 
     # Override config with CLI flag if provided
     if args.filename_truncation:
@@ -1100,32 +1187,89 @@ def main() -> None:
                     )
                 logger.info("--fetch-first: all metadata fetched, starting crawl pass.")
                 # Crawl pass: metadata already up to date, skip re-fetching
-                for i, (band_id, (artist_root, artist_urls)) in enumerate(artist_groups.items(), 1):
-                    if len(artist_groups) > 1:
+                if args.pipeline and len(artist_groups) > 1:
+                    upload_threads: list[threading.Thread] = []
+                    upload_errors: list[Exception] = []
+                    for i, (band_id, (artist_root, artist_urls)) in enumerate(artist_groups.items(), 1):
                         print(f"\n── Artist {i}/{len(artist_groups)} (band_id={band_id}) ──────────────────────────")
-                    did_work = run_smart_pipeline(
-                        artist_urls, output_dir, logger,
-                        skip_metadata=True,
-                        one_by_one=args.one_by_one,
-                        no_upload=args.no_upload,
-                    )
-                    if did_work and not args.one_by_one:
-                        run_upload(output_dir, args.no_upload, logger,
-                                   artist_folder=_find_artist_folder(band_id))
+                        artist_out = output_dir / f"band_{band_id}"
+                        artist_out.mkdir(parents=True, exist_ok=True)
+                        did_work = run_smart_pipeline(
+                            artist_urls, artist_out, logger,
+                            skip_metadata=True,
+                            no_upload=True,
+                        )
+                        if did_work and not args.no_upload:
+                            ul = logging.getLogger(f"upload[{band_id}]")
+                            t = threading.Thread(
+                                target=_upload_thread_target,
+                                args=(artist_out, False, ul, _find_artist_folder(band_id), upload_errors),
+                                name=f"upload-{band_id}",
+                                daemon=True,
+                            )
+                            upload_threads.append(t)
+                            t.start()
+                    for t in upload_threads:
+                        t.join()
+                    if upload_errors:
+                        logger.error("%d background upload(s) failed.", len(upload_errors))
+                        sys.exit(1)
+                else:
+                    for i, (band_id, (artist_root, artist_urls)) in enumerate(artist_groups.items(), 1):
+                        if len(artist_groups) > 1:
+                            print(f"\n── Artist {i}/{len(artist_groups)} (band_id={band_id}) ──────────────────────────")
+                        did_work = run_smart_pipeline(
+                            artist_urls, output_dir, logger,
+                            skip_metadata=True,
+                            one_by_one=args.one_by_one,
+                            no_upload=args.no_upload,
+                        )
+                        if did_work and not args.one_by_one:
+                            run_upload(output_dir, args.no_upload, logger,
+                                       artist_folder=_find_artist_folder(band_id))
             else:
-                for i, (band_id, (artist_root, artist_urls)) in enumerate(artist_groups.items(), 1):
-                    if len(artist_groups) > 1:
+                if args.pipeline and len(artist_groups) > 1:
+                    upload_threads = []
+                    upload_errors = []
+                    for i, (band_id, (artist_root, artist_urls)) in enumerate(artist_groups.items(), 1):
                         print(f"\n── Artist {i}/{len(artist_groups)} (band_id={band_id}) ──────────────────────────")
-                    did_work = run_smart_pipeline(
-                        artist_urls, output_dir, logger,
-                        skip_metadata=args.skip_metadata,
-                        skip_update=args.skip_update,
-                        one_by_one=args.one_by_one,
-                        no_upload=args.no_upload,
-                    )
-                    if did_work and not args.one_by_one:
-                        run_upload(output_dir, args.no_upload, logger,
-                                   artist_folder=_find_artist_folder(band_id))
+                        artist_out = output_dir / f"band_{band_id}"
+                        artist_out.mkdir(parents=True, exist_ok=True)
+                        did_work = run_smart_pipeline(
+                            artist_urls, artist_out, logger,
+                            skip_metadata=args.skip_metadata,
+                            skip_update=args.skip_update,
+                            no_upload=True,
+                        )
+                        if did_work and not args.no_upload:
+                            ul = logging.getLogger(f"upload[{band_id}]")
+                            t = threading.Thread(
+                                target=_upload_thread_target,
+                                args=(artist_out, False, ul, _find_artist_folder(band_id), upload_errors),
+                                name=f"upload-{band_id}",
+                                daemon=True,
+                            )
+                            upload_threads.append(t)
+                            t.start()
+                    for t in upload_threads:
+                        t.join()
+                    if upload_errors:
+                        logger.error("%d background upload(s) failed.", len(upload_errors))
+                        sys.exit(1)
+                else:
+                    for i, (band_id, (artist_root, artist_urls)) in enumerate(artist_groups.items(), 1):
+                        if len(artist_groups) > 1:
+                            print(f"\n── Artist {i}/{len(artist_groups)} (band_id={band_id}) ──────────────────────────")
+                        did_work = run_smart_pipeline(
+                            artist_urls, output_dir, logger,
+                            skip_metadata=args.skip_metadata,
+                            skip_update=args.skip_update,
+                            one_by_one=args.one_by_one,
+                            no_upload=args.no_upload,
+                        )
+                        if did_work and not args.one_by_one:
+                            run_upload(output_dir, args.no_upload, logger,
+                                       artist_folder=_find_artist_folder(band_id))
         return
 
     # ── JSON mode (resume from already-fetched artist JSONs) ─────────────────
@@ -1138,11 +1282,26 @@ def main() -> None:
         selected = _prompt_json_selection(pending)
         print(f"\nResuming {len(selected)} artist(s)...\n")
 
+        upload_threads: list[threading.Thread] = []
+        upload_errors: list[Exception] = []
+        use_pipeline = args.pipeline and len(selected) > 1
+
         for i, p in enumerate(selected, 1):
             if len(selected) > 1:
                 print(f"\n── Artist {i}/{len(selected)}: {p['name']} ──────────────────────────")
 
             artist_folder = p["folder"]
+            band_id = p["band_id"]
+
+            # Per-artist output subdir when pipelining so upload threads only
+            # see their own WACZs and never race with each other or with the
+            # main crawl thread touching a different artist's files.
+            if use_pipeline:
+                subdir_name = f"band_{band_id}" if band_id else f"band_{p['name']}"
+                artist_out = output_dir / subdir_name
+                artist_out.mkdir(parents=True, exist_ok=True)
+            else:
+                artist_out = output_dir
 
             # Resolve artist root URL for metadata fetch.
             # Take the first release-level URL (not from trackinfo) that has no
@@ -1203,12 +1362,33 @@ def main() -> None:
                     artist_folder = p["folder"]
 
             did_work = _run_pipeline_for_folder(
-                artist_folder, output_dir, logger,
+                artist_folder, artist_out, logger,
                 one_by_one=args.one_by_one,
-                no_upload=args.no_upload,
+                no_upload=True if use_pipeline else args.no_upload,
             )
-            if did_work and not args.one_by_one:
-                run_upload(output_dir, args.no_upload, logger, artist_folder=artist_folder)
+
+            if use_pipeline:
+                if did_work and not args.no_upload:
+                    ul = logging.getLogger(f"upload[{band_id or p['name']}]")
+                    t = threading.Thread(
+                        target=_upload_thread_target,
+                        args=(artist_out, False, ul, artist_folder, upload_errors),
+                        name=f"upload-{band_id or p['name']}",
+                        daemon=True,
+                    )
+                    upload_threads.append(t)
+                    t.start()
+            else:
+                if did_work and not args.one_by_one:
+                    run_upload(output_dir, args.no_upload, logger, artist_folder=artist_folder)
+
+        if upload_threads:
+            logger.info("Waiting for %d background upload(s) to finish...", len(upload_threads))
+            for t in upload_threads:
+                t.join()
+        if upload_errors:
+            logger.error("%d background upload(s) failed.", len(upload_errors))
+            sys.exit(1)
     sys.exit(0)
 
 
