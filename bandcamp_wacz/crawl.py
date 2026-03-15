@@ -12,6 +12,7 @@ Pipeline for each album URL:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -26,12 +27,45 @@ from .bandcamp import parse_page, subdomain_from_url, create_safe_filename, trun
 from .config import (
     BROWSERTRIX_IMAGE, WACZ_OUTPUT_DIR,
     CRAWL_WAIT_UNTIL, CRAWL_PAGE_LOAD_TIMEOUT, CRAWL_BEHAVIOR_TIMEOUT,
-    CRAWL_MAX_RETRIES, CRAWL_RETRY_DELAY, CONTAINER_RUNTIME,
+    CRAWL_MAX_RETRIES, CRAWL_RETRY_DELAY,
+    CRAWL_RATE_LIMIT_MAX_RETRIES, CRAWL_RATE_LIMIT_RETRY_DELAY,
+    CRAWL_TRACK_DELAY_MS,
+    CONTAINER_RUNTIME,
     FILENAME_MAX_BYTES, FILENAME_TRUNCATION,
 )
 from .metadata import process_archived_wacz
 
 logger = logging.getLogger(__name__)
+
+# Current inter-track delay passed to the behavior script via --behaviorOpts.
+# Starts at CRAWL_TRACK_DELAY_MS, doubles after each rate-limit, resets on success.
+_track_delay_ms: int = CRAWL_TRACK_DELAY_MS
+
+
+class RateLimitError(RuntimeError):
+    """Raised when Browsertrix reports a rate-limit response (HTTP 429) during a crawl."""
+
+
+def _is_rate_limited(line: str) -> bool:
+    """Return True if *line* is a JSON log entry with ``details.statusCode == 429``.
+
+    Browsertrix emits JSON-Lines log output. We only detect rate limits via the
+    structured ``details.statusCode`` field — never by scanning raw text — so
+    that the number 429 or rate-limit-adjacent words appearing in a title, URL,
+    or any other field cannot produce a false positive. Non-JSON lines (startup
+    banners, plain-text warnings) are ignored entirely.
+    """
+    line = line.strip()
+    if not line or not line.startswith("{"):
+        return False
+
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return False
+
+    details = obj.get("details")
+    return isinstance(details, dict) and details.get("status") == 429
 
 
 def _track_cover_urls_from_json(band_id: int, item_id: int, album_art_id: Optional[int]) -> list[str]:
@@ -116,8 +150,14 @@ def _build_crawl_config(album_url: str, extra_urls: list[str]) -> str:
     )
 
 
-def _run_container(config_path: Path, output_dir: Path, collection_name: str) -> Path:
-    """Run the Browsertrix container and return the path to the produced WACZ."""
+def _run_container(config_path: Path, output_dir: Path, collection_name: str, track_delay_ms: int = 100) -> Path:
+    """Run the Browsertrix container and return the path to the produced WACZ.
+
+    Streams container output to stdout in real time while also capturing it so
+    that rate-limit signals (HTTP 429 / "Too Many Requests") can be detected.
+    Raises :exc:`RateLimitError` when a rate limit is detected, and plain
+    :exc:`RuntimeError` for any other non-zero exit.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     behaviors_dir = Path(__file__).resolve().parent.parent / "behaviors"
@@ -132,15 +172,49 @@ def _run_container(config_path: Path, output_dir: Path, collection_name: str) ->
         "--config", "/crawls/crawl-config.yaml",
         "--collection", collection_name,
         "--customBehaviors", "/behaviors/bandcamp.js",
+        "--behaviorOpts", f'{{"trackDelayMs": {track_delay_ms}}}',
     ]
 
     logger.info("Starting container crawl: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=False, text=True)
 
-    if result.returncode != 0:
-        raise RuntimeError(f"Browsertrix exited with code {result.returncode}")
+    # Stream output to the terminal line-by-line while capturing it for
+    # rate-limit detection. stderr is merged into stdout so a single pass
+    # is enough and the interleaved output matches what the user sees.
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    captured: list[str] = []
+    rate_limited = False
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+        captured.append(line)
+        # Kill the container the moment a 429 is detected so we stop hammering
+        # Bandcamp immediately and can start the back-off wait right away.
+        if not rate_limited and _is_rate_limited(line):
+            rate_limited = True
+            logger.warning(
+                "Rate limit detected in crawl output — terminating container to retry after back-off."
+            )
+            proc.kill()
 
-    # Browsertrix nests the WACZ inside collections/<name>/
+    # Drain any remaining output after an early kill to avoid broken-pipe noise.
+    try:
+        for line in proc.stdout:
+            captured.append(line)
+    except Exception:
+        pass
+    proc.wait()
+
+    if rate_limited:
+        raise RateLimitError("Bandcamp rate-limited the crawl; retrying after back-off.")
+    if proc.returncode != 0:
+        raise RuntimeError(f"Browsertrix exited with code {proc.returncode}")
+
+    # Browsertrix nests the WACZ inside collections/<n>/
     wacz = output_dir.resolve() / "collections" / collection_name / f"{collection_name}.wacz"
     if not wacz.exists():
         alt = output_dir.resolve() / "collections" / f"{collection_name}.wacz"
@@ -247,22 +321,61 @@ def crawl_album(album_url: str, output_dir: Optional[Path] = None, update_json: 
         tmp.write(config_yaml)
         config_path = Path(tmp.name)
 
+    global _track_delay_ms
     try:
-        last_exc: Exception | None = None
-        for attempt in range(1, CRAWL_MAX_RETRIES + 2):  # +2: first try + retries
+        rate_limit_count = 0
+        regular_count = 0
+        while True:
+            logger.debug("Inter-track delay for this attempt: %dms", _track_delay_ms)
             try:
-                wacz_path = _run_container(config_path, out, collection_name)
+                wacz_path = _run_container(config_path, out, collection_name, _track_delay_ms)
+                # Success — reset the delay for the next album.
+                _track_delay_ms = CRAWL_TRACK_DELAY_MS
                 break
             except KeyboardInterrupt:
                 logger.warning("Crawl interrupted by user.")
                 raise KeyboardInterrupt() from None
-            except Exception as exc:
-                last_exc = exc
-                if attempt <= CRAWL_MAX_RETRIES:
-                    wait = CRAWL_RETRY_DELAY * attempt
+            except RateLimitError as exc:
+                rate_limit_count += 1
+                # Double the inter-track delay for the next attempt so the
+                # behavior script paces itself more conservatively.
+                _track_delay_ms = min(_track_delay_ms * 2, 8000)
+                logger.warning(
+                    "Rate limit hit — inter-track delay increased to %dms for next attempt.",
+                    _track_delay_ms,
+                )
+                if rate_limit_count <= CRAWL_RATE_LIMIT_MAX_RETRIES:
+                    # Remove the partial collection written by the killed container
+                    # so the retry starts with a clean slate and doesn't bundle
+                    # incomplete WARCs into the final WACZ.
+                    partial_dir = out / "collections" / collection_name
+                    if partial_dir.exists():
+                        shutil.rmtree(partial_dir, ignore_errors=True)
+                        logger.debug("Removed partial collection directory: %s", partial_dir)
+                    wait = CRAWL_RATE_LIMIT_RETRY_DELAY * rate_limit_count
                     logger.warning(
-                        "Crawl attempt %d/%d failed for %s: %s  — retrying in %ds...",
-                        attempt, CRAWL_MAX_RETRIES + 1, album_url, exc, wait,
+                        "Crawl rate-limited (attempt %d/%d) for %s — retrying in %ds...",
+                        rate_limit_count, CRAWL_RATE_LIMIT_MAX_RETRIES + 1, album_url, wait,
+                    )
+                    try:
+                        time.sleep(wait)
+                    except KeyboardInterrupt:
+                        logger.warning("Crawl retry wait interrupted by user.")
+                        raise KeyboardInterrupt() from None
+                else:
+                    logger.error(
+                        "Rate limit persisted after %d attempt(s) for %s — "
+                        "skipping WACZ creation, upload, and JSON update.",
+                        rate_limit_count, album_url,
+                    )
+                    raise
+            except Exception as exc:
+                regular_count += 1
+                if regular_count <= CRAWL_MAX_RETRIES:
+                    wait = CRAWL_RETRY_DELAY * regular_count
+                    logger.warning(
+                        "Crawl attempt %d/%d failed for %s: %s — retrying in %ds...",
+                        regular_count, CRAWL_MAX_RETRIES + 1, album_url, exc, wait,
                     )
                     try:
                         time.sleep(wait)
@@ -272,9 +385,9 @@ def crawl_album(album_url: str, output_dir: Optional[Path] = None, update_json: 
                 else:
                     logger.error(
                         "Crawl failed after %d attempt(s) for %s: %s",
-                        attempt, album_url, exc,
+                        regular_count + rate_limit_count, album_url, exc,
                     )
-                    raise last_exc
+                    raise
     finally:
         config_path.unlink(missing_ok=True)
 

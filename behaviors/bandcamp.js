@@ -12,16 +12,24 @@
  *
  * On standalone single pages (no "from … by …" header): behaves the same as
  * an album page and fetches the audio in full.
+ *
+ * trackDelayMs (default: 100) — milliseconds to wait between consecutive track
+ * fetches. Passed from Python via --behaviorOpts '{"trackDelayMs": N}' and
+ * automatically increased after each rate-limit retry.
  */
 class BandcampBehavior {
   static id = "BandcampPlay";
+  static trackDelayMs = 100;
 
   static isMatch() {
     return window.location.hostname.endsWith("bandcamp.com");
   }
 
-  // Required by Browsertrix 1.11.4
-  static async init() {
+  // Receives opts from --behaviorOpts JSON passed by Browsertrix.
+  static async init(opts) {
+    if (opts && typeof opts.trackDelayMs === "number") {
+      BandcampBehavior.trackDelayMs = opts.trackDelayMs;
+    }
     return true;
   }
 
@@ -48,7 +56,7 @@ class BandcampBehavior {
     }
 
     if (data && data.trackinfo) {
-      yield "Extracting audio stream URLs from page metadata...";
+      yield `Extracting audio stream URLs from page metadata... (inter-track delay: ${BandcampBehavior.trackDelayMs}ms)`;
       for (let i = 0; i < data.trackinfo.length; i++) {
         const track = data.trackinfo[i];
 
@@ -63,6 +71,12 @@ class BandcampBehavior {
             yield `✓ Captured track ${i + 1}`;
           } catch (e) {
             yield `✗ Failed track ${i + 1}: ${e.message}`;
+          }
+
+          // Pace requests to avoid triggering Bandcamp's rate limiter.
+          // Delay is skipped after the last track.
+          if (i < data.trackinfo.length - 1 && BandcampBehavior.trackDelayMs > 0) {
+            await new Promise(r => setTimeout(r, BandcampBehavior.trackDelayMs));
           }
         }
       }

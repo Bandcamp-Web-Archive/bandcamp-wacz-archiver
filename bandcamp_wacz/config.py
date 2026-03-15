@@ -59,6 +59,18 @@ CRAWL_MAX_RETRIES: int = int(os.getenv("CRAWL_MAX_RETRIES", "3"))
 # Seconds to wait before retrying a failed crawl (linear back-off: delay * attempt).
 CRAWL_RETRY_DELAY: int = int(os.getenv("CRAWL_RETRY_DELAY", "30"))
 
+# Number of times to retry when Browsertrix hits a rate limit (HTTP 429).
+# Rate-limit retries are counted separately from general crawl retries.
+CRAWL_RATE_LIMIT_MAX_RETRIES: int = int(os.getenv("CRAWL_RATE_LIMIT_MAX_RETRIES", "3"))
+
+# Seconds to wait before retrying after a rate limit (linear back-off: delay * attempt).
+# Defaults to 120 s — longer than CRAWL_RETRY_DELAY because rate limits need time to clear.
+CRAWL_RATE_LIMIT_RETRY_DELAY: int = int(os.getenv("CRAWL_RATE_LIMIT_RETRY_DELAY", "120"))
+
+# Starting inter-track delay in milliseconds passed to the behavior script.
+# Doubled after each rate-limit retry and reset to this value after every successful crawl.
+CRAWL_TRACK_DELAY_MS: int = int(os.getenv("CRAWL_TRACK_DELAY_MS", "100"))
+
 # ── Filename limits ───────────────────────────────────────────────────────────
 
 # Maximum filename length in bytes (pixeldrain enforces a 255-character limit).

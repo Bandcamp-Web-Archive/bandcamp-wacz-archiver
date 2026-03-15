@@ -27,6 +27,7 @@ import argparse
 import json
 import logging
 import re
+from urllib.parse import quote
 import sys
 import time
 import zipfile
@@ -199,6 +200,24 @@ def _find_artist_json(band_id: int) -> Optional[Path]:
     return None
 
 
+def _page_artist_from_band_id(band_id: int) -> Optional[str]:
+    """
+    Return the page artist name by inspecting the artist folder in ARTISTS_DIR.
+
+    The folder is named '{page_artist} [{band_id}]', so we strip the
+    ' [{band_id}]' suffix to recover the page artist. This is the artist whose
+    Bandcamp page was crawled — distinct from the per-release 'artist' field,
+    which can differ for split releases (e.g. 'Saint Elisabeth + Séraphitüs-Séraphîta').
+    """
+    if not ARTISTS_DIR.exists():
+        return None
+    suffix = f" [{band_id}]"
+    for folder in ARTISTS_DIR.iterdir():
+        if folder.is_dir() and folder.name.endswith(suffix):
+            return folder.name[: -len(suffix)]
+    return None
+
+
 def _mark_uploaded(band_id: int, item_id: int, pd_wacz_id: str) -> None:
     """Set uploaded=True, uploaded_at, and pd_wacz_id on the album in the artist JSON."""
     json_path = _find_artist_json(band_id)
@@ -273,14 +292,24 @@ def upload_release(wacz_path: Path, dry_run: bool) -> bool:
         return False
 
     band_id = int(band_id)
-    artist_name = release.get("artist") or datapackage.get("bandcamp_artist") or "unknown"
-    folder = artist_folder_name(artist_name, band_id)
+    # Use the page artist (from the ARTISTS_DIR folder name) so that split
+    # releases don't create a separate folder per release artist.
+    # E.g. a Saint Elisabeth page with a split release
+    # "Saint Elisabeth + Séraphitüs-Séraphîta" must still land in
+    # "Saint Elisabeth [<band_id>]".
+    page_artist = (
+        _page_artist_from_band_id(band_id)
+        or release.get("artist")
+        or datapackage.get("bandcamp_artist")
+        or "unknown"
+    )
+    folder = artist_folder_name(page_artist, band_id)
     logger.info("Uploading: %s (folder=%s)", wacz_path.name, folder)
 
     if dry_run:
         print(f"  [DRY RUN] Would upload {wacz_path.name}")
         print(f"            folder : {folder}/")
-        print(f"            artist : {artist_name}")
+        print(f"            artist : {page_artist}")
         print(f"            title  : {release.get('title', '?')}")
         print(f"            size   : {wacz_path.stat().st_size:,} bytes")
         return True
@@ -290,7 +319,7 @@ def upload_release(wacz_path: Path, dry_run: bool) -> bool:
         return False
 
     # Upload to Pixeldrain via PUT /api/filesystem/me/{folder}/{filename}
-    upload_url = f"{PD_FS_BASE_URL}/{folder}/{wacz_path.name}"
+    upload_url = f"{PD_FS_BASE_URL}/{folder}/{quote(wacz_path.name)}"
     pd_wacz_id: Optional[str] = None
 
     for attempt in range(1, PD_MAX_RETRIES + 2):
