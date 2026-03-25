@@ -327,6 +327,114 @@ def _group_urls_by_artist(
     return groups
 
 
+# ── Artist sorting ────────────────────────────────────────────────────────────
+
+def _get_artist_display_name(band_id: int, artist_root: str) -> str:
+    """
+    Return the artist's real display name for sorting purposes.
+
+    Reads it from the artist folder name (e.g. "Akira Umeda [3774983561]" → "akira umeda"),
+    which is the canonical display name used throughout the project.
+    Falls back to the Bandcamp subdomain slug if the folder hasn't been fetched yet.
+    """
+    folder = _find_artist_folder(band_id)
+    if folder:
+        import re as _re
+        name = _re.sub(r'\s*\[\d+\]$', '', folder.name).strip()
+        return name.lower()
+    # Fallback: use the subdomain slug (better than nothing)
+    from urllib.parse import urlparse
+    hostname = urlparse(artist_root).hostname or ""
+    return hostname.split(".")[0].lower()
+
+
+def _get_release_counts(band_id: int) -> tuple[int, int]:
+    """
+    Return (total_releases, remaining_releases) for a band_id by reading the artist JSON.
+    remaining = releases where archived=False.
+    Returns (0, 0) if the folder or JSON cannot be found.
+    """
+    import json as _json
+
+    folder = _find_artist_folder(band_id)
+    if not folder:
+        return (0, 0)
+    json_path = folder / f"{folder.name}.json"
+    if not json_path.exists():
+        return (0, 0)
+    try:
+        data = _json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return (0, 0)
+
+    total = 0
+    remaining = 0
+    for key, releases in data.items():
+        if key.startswith("_") or not isinstance(releases, list):
+            continue
+        for r in releases:
+            total += 1
+            if not r.get("archived"):
+                remaining += 1
+    return (total, remaining)
+
+
+def _sort_artist_groups(
+    artist_groups: dict[int, tuple[str, list[str]]],
+    order: str,
+    logger: logging.Logger,
+) -> dict[int, tuple[str, list[str]]]:
+    """
+    Return artist_groups re-ordered according to *order*.
+
+    Supported values
+    ----------------
+    az             – artist display name A → Z
+    za             – artist display name Z → A
+    releases-asc   – total release count, lowest first
+    releases-dsc   – total release count, highest first
+    remaining-asc  – unarchived release count, lowest first  (most complete first)
+    remaining-dsc  – unarchived release count, highest first (least complete first)
+    """
+    items = list(artist_groups.items())
+
+    if order in ("az", "za"):
+        items.sort(
+            key=lambda kv: _get_artist_display_name(kv[0], kv[1][0]),
+            reverse=(order == "za"),
+        )
+
+    elif order in ("releases-asc", "releases-dsc"):
+        missing = [band_id for band_id, _ in items if _find_artist_folder(band_id) is None]
+        if missing:
+            logger.warning(
+                "Artist folder(s) not found for band_id(s) %s — "
+                "release counts will be 0 for those artists. "
+                "Run fetch_metadata first, or use --fetch-first to fetch before sorting.",
+                ", ".join(str(b) for b in missing),
+            )
+        items.sort(
+            key=lambda kv: _get_release_counts(kv[0])[0],
+            reverse=(order == "releases-dsc"),
+        )
+
+    elif order in ("remaining-asc", "remaining-dsc"):
+        missing = [band_id for band_id, _ in items if _find_artist_folder(band_id) is None]
+        if missing:
+            logger.warning(
+                "Artist folder(s) not found for band_id(s) %s — "
+                "remaining counts will be 0 for those artists. "
+                "Run fetch_metadata first, or use --fetch-first to fetch before sorting.",
+                ", ".join(str(b) for b in missing),
+            )
+        items.sort(
+            key=lambda kv: _get_release_counts(kv[0])[1],
+            reverse=(order == "remaining-dsc"),
+        )
+
+    return dict(items)
+
+
 # ── Smart pipeline ────────────────────────────────────────────────────────────
 
 def run_smart_pipeline(
@@ -1042,6 +1150,15 @@ def build_parser() -> argparse.ArgumentParser:
              "'end' (cut the title short), 'middle' (keep start and end with ... in between), "
              "'hash' (replace title with a short SHA-1 digest). "
              "Overrides FILENAME_TRUNCATION in .env (default: end).")
+    parser.add_argument("--artist-order", metavar="ORDER",
+        choices=["az", "za", "releases-asc", "releases-dsc", "remaining-asc", "remaining-dsc"],
+        default=None,
+        help="Order in which multiple artists are processed. "
+             "az/za = alphabetical by display name. "
+             "releases-asc/releases-dsc = by total release count (requires metadata). "
+             "remaining-asc/remaining-dsc = by unarchived release count — "
+             "remaining-asc puts the most-complete artists first. "
+             "For count-based orders, combine with --fetch-first to ensure counts are current.")
     parser.add_argument("--debug", "-d", action="store_true",
         help="Enable verbose debug logging.")
     return parser
@@ -1169,11 +1286,14 @@ def main() -> None:
                     "Multiple artists detected (%d) — running smart pipeline for each.",
                     len(artist_groups),
                 )
-            if len(artist_groups) > 1:
-                logger.info(
-                    "Multiple artists detected (%d) — running smart pipeline for each.",
-                    len(artist_groups),
-                )
+            if args.artist_order and len(artist_groups) > 1:
+                # az/za can be applied immediately (uses folder name, no network needed).
+                # Count-based orders are deferred until after --fetch-first so counts
+                # are fresh; without --fetch-first they're applied now against whatever
+                # is already on disk (with a warning if folders are missing).
+                if args.artist_order in ("az", "za") or not args.fetch_first:
+                    artist_groups = _sort_artist_groups(artist_groups, args.artist_order, logger)
+                    logger.info("Artists sorted by: %s", args.artist_order)
             if args.fetch_first:
                 logger.info("--fetch-first: fetching metadata for all %d artist(s) before crawling.", len(artist_groups))
                 for i, (band_id, (artist_root, artist_urls)) in enumerate(artist_groups.items(), 1):
@@ -1186,6 +1306,14 @@ def main() -> None:
                         fetch_only=True,
                     )
                 logger.info("--fetch-first: all metadata fetched, starting crawl pass.")
+                # Apply count-based sort now that all metadata is on disk.
+                if (
+                    getattr(args, "artist_order", None)
+                    and args.artist_order not in ("az", "za")
+                    and len(artist_groups) > 1
+                ):
+                    artist_groups = _sort_artist_groups(artist_groups, args.artist_order, logger)
+                    logger.info("Artists sorted by: %s (post-fetch)", args.artist_order)
                 # Crawl pass: metadata already up to date, skip re-fetching
                 if args.pipeline and len(artist_groups) > 1:
                     upload_threads: list[threading.Thread] = []
@@ -1280,6 +1408,23 @@ def main() -> None:
             sys.exit(0)
 
         selected = _prompt_json_selection(pending)
+
+        if args.artist_order and len(selected) > 1:
+            import re as _re
+            if args.artist_order == "az":
+                selected.sort(key=lambda p: _re.sub(r'\s*\[\d+\]$', '', p["name"]).strip().lower())
+            elif args.artist_order == "za":
+                selected.sort(key=lambda p: _re.sub(r'\s*\[\d+\]$', '', p["name"]).strip().lower(), reverse=True)
+            elif args.artist_order == "releases-asc":
+                selected.sort(key=lambda p: p["n_uncrawled"] + p["n_unuploaded"])
+            elif args.artist_order == "releases-dsc":
+                selected.sort(key=lambda p: p["n_uncrawled"] + p["n_unuploaded"], reverse=True)
+            elif args.artist_order == "remaining-asc":
+                selected.sort(key=lambda p: p["n_uncrawled"])
+            elif args.artist_order == "remaining-dsc":
+                selected.sort(key=lambda p: p["n_uncrawled"], reverse=True)
+            logger.info("Artists sorted by: %s", args.artist_order)
+
         print(f"\nResuming {len(selected)} artist(s)...\n")
 
         upload_threads: list[threading.Thread] = []
