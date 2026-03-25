@@ -180,8 +180,14 @@ def _read_wacz_datapackage(wacz_path: Path) -> dict:
 
 
 def _band_item_id_from_filename(wacz_path: Path) -> tuple[Optional[int], Optional[int]]:
-    """Parse item_id from filename as a last-resort fallback."""
-    m = re.search(r'\[(\d+)\]\.wacz$', wacz_path.name)
+    """Parse item_id from filename as a last-resort fallback.
+
+    Matches both the canonical form  ``Title [item_id].wacz``  and the
+    versioned re-archive form  ``Title [item_id] 20260325T050059Z.wacz``.
+    The ``[item_id]`` bracket group does not have to be at the very end of
+    the stem, so we do *not* anchor the pattern to ``\\.wacz$``.
+    """
+    m = re.search(r'\[(\d+)\]', wacz_path.name)
     if m:
         return None, int(m.group(1))
     return None, None
@@ -215,6 +221,24 @@ def _page_artist_from_band_id(band_id: int) -> Optional[str]:
     for folder in ARTISTS_DIR.iterdir():
         if folder.is_dir() and folder.name.endswith(suffix):
             return folder.name[: -len(suffix)]
+    return None
+
+
+def _get_existing_pd_wacz_id(band_id: int, item_id: int) -> Optional[str]:
+    """Return the current pd_wacz_id for an item, or None if it has never been uploaded."""
+    json_path = _find_artist_json(band_id)
+    if not json_path:
+        return None
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    for key, releases in data.items():
+        if key.startswith("_") or not isinstance(releases, list):
+            continue
+        for release in releases:
+            if release.get("item_id") == item_id:
+                return release.get("pd_wacz_id") or None
     return None
 
 
@@ -304,19 +328,52 @@ def upload_release(wacz_path: Path, dry_run: bool) -> bool:
         or "unknown"
     )
     folder = artist_folder_name(page_artist, band_id)
-    logger.info("Uploading: %s (folder=%s)", wacz_path.name, folder)
+
+    # Detect re-archives: if this item already has a pd_wacz_id it was
+    # uploaded before.  Uploading to the same filename would silently
+    # overwrite the existing Pixeldrain file and return the same share ID,
+    # making the new and old entries indistinguishable in _history.
+    # Instead, append a timestamp to the filename so every re-archive
+    # lands as a distinct file on Pixeldrain.
+    #
+    # Canonical filename : Title [item_id].wacz
+    # Re-archive filename: Title [item_id] 20260325.wacz
+    #
+    # The timestamp tag is placed AFTER [item_id] so _band_item_id_from_filename
+    # can still parse item_id as a fallback (its regex no longer anchors to
+    # the end of the name).
+    existing_pd_id = _get_existing_pd_wacz_id(band_id, int(item_id))
+    rearchive_name: Optional[str] = None
+    if existing_pd_id:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+        rearchive_name = f"{wacz_path.stem} {timestamp}.wacz"
+        logger.info(
+            "Re-archive detected (existing pd_wacz_id=%s) — will upload as: %s",
+            existing_pd_id, rearchive_name,
+        )
+
+    logger.info("Uploading: %s (folder=%s)", rearchive_name or wacz_path.name, folder)
 
     if dry_run:
-        print(f"  [DRY RUN] Would upload {wacz_path.name}")
+        upload_name = rearchive_name or wacz_path.name
+        print(f"  [DRY RUN] Would upload {upload_name}")
         print(f"            folder : {folder}/")
         print(f"            artist : {page_artist}")
         print(f"            title  : {release.get('title', '?')}")
         print(f"            size   : {wacz_path.stat().st_size:,} bytes")
+        if rearchive_name:
+            print(f"            note   : re-archive, would rename from {wacz_path.name}")
         return True
 
     # Ensure the per-artist folder exists on Pixeldrain
     if not _ensure_pd_folder(folder):
         return False
+
+    # Rename to versioned filename now that we're committed to uploading
+    if rearchive_name:
+        versioned_path = wacz_path.with_name(rearchive_name)
+        wacz_path.rename(versioned_path)
+        wacz_path = versioned_path
 
     # Upload to Pixeldrain via PUT /api/filesystem/me/{folder}/{filename}
     upload_url = f"{PD_FS_BASE_URL}/{folder}/{quote(wacz_path.name)}"

@@ -27,3 +27,4 @@ phantomjs/
 # Editors
 .vscode/
 .idea/
+*.diff
