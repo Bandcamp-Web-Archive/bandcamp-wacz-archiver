@@ -721,6 +721,39 @@ def run_quick_pipeline(
                                     fresh.get("title"),
                                 )
                                 need_crawl = False
+                            elif existing.get("archived") and not existing.get("uploaded"):
+                                # Upload previously failed but the WACZ may still be on disk.
+                                # Scan WACZ_OUTPUT_DIR before committing to a full re-crawl.
+                                search_root = WACZ_OUTPUT_DIR if WACZ_OUTPUT_DIR.exists() else output_dir
+                                existing_wacz: Path | None = None
+                                if search_root:
+                                    existing_wacz = next(
+                                        (p for p in search_root.rglob("*.wacz")
+                                         if _item_id_from_wacz(p) == item_id),
+                                        None,
+                                    )
+                                if existing_wacz:
+                                    logger.info(
+                                        "'%s' already crawled (WACZ at %s) but upload failed"
+                                        " - skipping re-crawl, retrying upload.",
+                                        fresh.get("title"), existing_wacz,
+                                    )
+                                    need_crawl = False
+                                    if not no_upload:
+                                        run_upload(
+                                            output_dir,
+                                            no_upload=False,
+                                            logger=logger,
+                                            artist_folder=folder,
+                                        )
+                                    continue
+                                else:
+                                    logger.info(
+                                        "'%s' unchanged but not fully done (archived=%s uploaded=%s)"
+                                        " and no WACZ found on disk - re-crawling.",
+                                        fresh.get("title"),
+                                        existing.get("archived"), existing.get("uploaded"),
+                                    )
                             else:
                                 logger.info(
                                     "'%s' unchanged but not fully done (archived=%s uploaded=%s) - proceeding.",
