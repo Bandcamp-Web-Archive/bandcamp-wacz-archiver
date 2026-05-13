@@ -117,34 +117,45 @@ def _to_artist_root(url: str) -> str:
 
 
 def _fetch_band_id(artist_root: str) -> int | None:
-    """Fetch the artist page and extract band_id."""
+    """Fetch the artist page and extract band_id. Falls back to /music if needed."""
     from bandcamp_wacz.bandcamp import fetch_url
     import bs4, json, re
-    try:
-        resp = fetch_url(artist_root)
-        soup = bs4.BeautifulSoup(resp.text, "lxml")
-    except Exception:
+    from urllib.parse import urlparse, urlunparse
+
+    urls_to_try = [artist_root]
+
+    # Add the /music fallback if it's a root URL
+    parsed = urlparse(artist_root)
+    if not parsed.path or parsed.path in ("/", ""):
+        urls_to_try.append(urlunparse(parsed._replace(path="/music")))
+
+    for url in urls_to_try:
         try:
-            soup = bs4.BeautifulSoup(resp.text, "html.parser")
+            resp = fetch_url(url)
+            try:
+                soup = bs4.BeautifulSoup(resp.text, "lxml")
+            except bs4.FeatureNotFound:
+                soup = bs4.BeautifulSoup(resp.text, "html.parser")
         except Exception:
-            return None
+            continue  # Fetch failed, try the fallback URL
 
-    div = soup.find("div", {"id": "pagedata"})
-    if not div:
-        return None
-    try:
-        blob = json.loads(div.get("data-blob", "{}"))
-    except Exception:
-        return None
+        div = soup.find("div", {"id": "pagedata"})
+        if not div:
+            continue
 
-    band_id = blob.get("id")
-    if band_id:
-        return int(band_id)
+        try:
+            blob = json.loads(div.get("data-blob", "{}"))
+        except Exception:
+            blob = {}
 
-    lo = blob.get("lo_querystr", "") or ""
-    m = re.search(r'band_id=(\d+)', lo)
-    if m:
-        return int(m.group(1))
+        band_id = blob.get("id")
+        if band_id:
+            return int(band_id)
+
+        lo = blob.get("lo_querystr", "") or ""
+        m = re.search(r'band_id=(\d+)', lo)
+        if m:
+            return int(m.group(1))
 
     return None
 

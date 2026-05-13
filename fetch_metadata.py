@@ -756,7 +756,18 @@ def main() -> None:
     primary_band_id: Optional[int] = None
 
     try:
-        resp = scraper._get(args.urls[0])
+        try:
+            resp = scraper._get(args.urls[0])
+        except Exception as e:
+            parsed = urlparse(args.urls[0])
+            # If the URL is just the root (slug.bandcamp.com or slug.bandcamp.com/), try /music
+            if not parsed.path or parsed.path in ("/", ""):
+                fallback_url = urlunparse(parsed._replace(path="/music"))
+                print(f"  Failed to fetch {args.urls[0]} ({e}), trying {fallback_url}...")
+                resp = scraper._get(fallback_url)
+            else:
+                raise e
+
         soup = scraper._make_soup(resp.text)
 
         el = soup.select_one("p#band-name-location span.title")

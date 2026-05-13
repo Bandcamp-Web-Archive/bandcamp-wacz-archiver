@@ -69,43 +69,66 @@ def embed_metadata_in_wacz(wacz_path: Path, band_id: int, item_id: int, album: d
     tmp_path = wacz_path.with_suffix(".wacz.tmp")
 
     try:
+        # Read only the two small files that need patching — do NOT load the
+        # entire ZIP into memory (WACZ files can exceed 10 GB).
         with zipfile.ZipFile(wacz_path, "r") as zin:
-            infos   = {info.filename: info for info in zin.infolist()}
-            entries: dict[str, bytes] = {name: zin.read(name) for name in infos}
+            all_infos = zin.infolist()
+            info_map  = {info.filename: info for info in all_infos}
 
-        if DATAPACKAGE not in entries:
-            logger.warning("No %s found in %s — skipping metadata embed.", DATAPACKAGE, wacz_path.name)
-            return False
+            if DATAPACKAGE not in info_map:
+                logger.warning("No %s found in %s — skipping metadata embed.", DATAPACKAGE, wacz_path.name)
+                return False
 
-        # Patch datapackage.json
-        try:
-            pkg = json.loads(entries[DATAPACKAGE].decode("utf-8"))
-        except Exception as exc:
-            logger.warning("Could not parse %s in %s: %s", DATAPACKAGE, wacz_path.name, exc)
-            return False
+            # Patch datapackage.json (tiny — safe to read in full)
+            try:
+                pkg = json.loads(zin.read(DATAPACKAGE).decode("utf-8"))
+            except Exception as exc:
+                logger.warning("Could not parse %s in %s: %s", DATAPACKAGE, wacz_path.name, exc)
+                return False
 
         pkg["bandcamp_band_id"] = band_id
         pkg["bandcamp_item_id"] = item_id
-        entries[DATAPACKAGE] = json.dumps(pkg, indent=2, ensure_ascii=False).encode("utf-8")
+        patched_datapackage: bytes = json.dumps(pkg, indent=2, ensure_ascii=False).encode("utf-8")
 
-        # Build release.json — strip pipeline-internal fields
+        # Build release.json — strip pipeline-internal fields (also tiny)
         release = {k: v for k, v in album.items() if k not in ("archived", "uploaded", "archived_at", "uploaded_at")}
         release["band_id"] = band_id
-        entries[RELEASE_JSON_ENTRY] = json.dumps(release, indent=4, ensure_ascii=False).encode("utf-8")
+        release_bytes: bytes = json.dumps(release, indent=4, ensure_ascii=False).encode("utf-8")
 
-        # Rewrite the ZIP in one pass, preserving compression of existing entries
+        # Rewrite the ZIP in one streaming pass.
+        # Large entries are copied directly between ZipFile objects without
+        # ever being fully buffered in Python — only the two patched entries
+        # (both small JSON files) are held in memory as bytes.
         now = datetime.now(timezone.utc).timetuple()[:6]
-        with zipfile.ZipFile(tmp_path, "w") as zout:
-            for name, data in entries.items():
-                if name in infos:
-                    orig = infos[name]
-                    compress = zipfile.ZIP_DEFLATED if name in (DATAPACKAGE, RELEASE_JSON_ENTRY) else orig.compress_type
+        patched_names = {DATAPACKAGE, RELEASE_JSON_ENTRY}
+        with zipfile.ZipFile(wacz_path, "r") as zin, \
+             zipfile.ZipFile(tmp_path, "w") as zout:
+            # First, stream every existing entry, substituting the patched
+            # datapackage.json and skipping any stale release.json.
+            for orig in zin.infolist():
+                if orig.filename == DATAPACKAGE:
                     info = zipfile.ZipInfo(filename=orig.filename, date_time=orig.date_time)
+                    zout.writestr(info, patched_datapackage, compress_type=zipfile.ZIP_DEFLATED)
+                elif orig.filename == RELEASE_JSON_ENTRY:
+                    pass  # Will be written fresh below
                 else:
-                    # New entry (release.json)
-                    compress = zipfile.ZIP_DEFLATED
-                    info = zipfile.ZipInfo(filename=name, date_time=now)
-                zout.writestr(info, data, compress_type=compress)
+                    # Stream the entry without reading it into Python memory.
+                    with zin.open(orig) as src:
+                        info = zipfile.ZipInfo(filename=orig.filename, date_time=orig.date_time)
+                        info.compress_type = orig.compress_type
+                        with zout.open(info, "w") as dst:
+                            while True:
+                                chunk = src.read(1 << 20)  # 1 MiB chunks
+                                if not chunk:
+                                    break
+                                dst.write(chunk)
+
+            # Finally, append the (possibly new) release.json entry.
+            rel_info = zipfile.ZipInfo(
+                filename=RELEASE_JSON_ENTRY,
+                date_time=info_map[RELEASE_JSON_ENTRY].date_time if RELEASE_JSON_ENTRY in info_map else now,
+            )
+            zout.writestr(rel_info, release_bytes, compress_type=zipfile.ZIP_DEFLATED)
 
         tmp_path.replace(wacz_path)
         logger.info("Embedded metadata (band_id=%s item_id=%s) into %s", band_id, item_id, wacz_path.name)
